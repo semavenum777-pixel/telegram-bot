@@ -23,9 +23,29 @@ def send_message(chat_id, text):
     )
 
 
+def set_webhook():
+    render_url = os.environ.get("RENDER_EXTERNAL_URL")
+
+    if not render_url:
+        print("RENDER_EXTERNAL_URL not found")
+        return
+
+    webhook_url = f"{render_url}/webhook"
+
+    response = requests.post(
+        f"{TELEGRAM_API}/setWebhook",
+        json={
+            "url": webhook_url
+        },
+        timeout=10
+    )
+
+    print("Webhook:", response.text)
+
+
 @app.route("/", methods=["GET"])
 def home():
-    return "Telegram bot is running!"
+    return "Telegram sticker bot is running!"
 
 
 @app.route("/webhook", methods=["POST"])
@@ -40,15 +60,23 @@ def webhook():
     if not message:
         return "OK"
 
-    chat_id = message["chat"]["id"]
+    chat = message.get("chat")
+
+    if not chat:
+        return "OK"
+
+    chat_id = chat["id"]
     text = message.get("text", "")
 
     if text == "/start":
         send_message(
             chat_id,
-            "🤖 Привет! Бот запущен.\n\nНапиши мне что-нибудь."
+            "🤖 Привет! Бот запущен!\n\n"
+            "Я будущий бот для создания Telegram-стикеров.\n\n"
+            "Пока я умею отвечать на сообщения."
         )
-    else:
+
+    elif text:
         send_message(
             chat_id,
             f"Ты написал:\n{text}"
@@ -58,5 +86,11 @@ def webhook():
 
 
 if __name__ == "__main__":
+    set_webhook()
+
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
