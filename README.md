@@ -1,19 +1,48 @@
 # Telegram Sticker Bot
 
-Бот превращает присланную картинку (фото или файл PNG/JPG/WEBP) в стикер 512×512 в формате WEBP.
+Бот делает стикеры для Telegram:
 
-## Запуск на Render
+- **картинка без подписи** → стикер 512×512;
+- **картинка + подпись** («сделай аниме, фон космос, надпись "Привет"») → нейросеть меняет фото, бот добавляет надпись;
+- **только текст** («кот в очках, без фона, надпись "Йо"») → нейросеть рисует стикер с нуля.
 
-1. Создайте бота у [@BotFather](https://t.me/BotFather) и скопируйте токен.
-2. На [render.com](https://render.com) нажмите **New → Blueprint** и выберите этот репозиторий.
-   Настройки сборки и запуска Render возьмёт из `render.yaml`.
-3. Вставьте токен в поле `BOT_TOKEN` и нажмите **Apply**.
-4. Вебхук настроится автоматически (Render сам передаёт `RENDER_EXTERNAL_URL`).
+Нейросети бесплатные и перебираются по очереди: сначала Cloudflare Workers AI
+(~300 картинок в день бесплатно), при ошибке или исчерпанном лимите — Pollinations.
+
+## Запуск (всё бесплатно, без карты)
+
+### 1. Токен бота
+Создайте бота у [@BotFather](https://t.me/BotFather) и скопируйте токен.
+
+### 2. Нейросеть Cloudflare (основная)
+1. Зарегистрируйтесь на [dash.cloudflare.com](https://dash.cloudflare.com/sign-up).
+2. Откройте **AI → Workers AI → Use REST API**.
+3. Скопируйте **Account ID**.
+4. Нажмите **Create a Workers AI API Token → Create API Token** и скопируйте токен.
+
+### 3. Нейросеть Pollinations (запасная, необязательно)
+Войдите на [enter.pollinations.ai](https://enter.pollinations.ai) через GitHub и создайте ключ `sk_...`.
+
+### 4. Хостинг Vercel
+1. Войдите на [vercel.com](https://vercel.com) через GitHub.
+2. **Add New → Project** → выберите репозиторий `telegram-bot` → **Import**.
+3. В **Environment Variables** добавьте переменные из таблицы ниже.
+4. Нажмите **Deploy**.
+5. Когда деплой закончится, откройте `https://<ваш-проект>.vercel.app/setup` —
+   появится «✅ Бот подключён!».
+
+Дальше Vercel сам обновляет бота при каждом изменении в ветке `main`.
 
 ## Переменные окружения
 
 | Переменная | Обязательна | Описание |
 |---|---|---|
 | `BOT_TOKEN` | да | Токен от @BotFather |
-| `WEBHOOK_URL` | нет | Публичный адрес сервиса, если хостинг не Render |
+| `CF_ACCOUNT_ID` | для нейросети | Account ID из Cloudflare |
+| `CF_API_TOKEN` | для нейросети | API-токен Workers AI |
+| `POLLINATIONS_KEY` | нет | Ключ Pollinations — запасная нейросеть |
 | `WEBHOOK_SECRET` | нет | Секрет для проверки запросов от Telegram (по умолчанию выводится из токена) |
+
+Без ключей нейросетей бот всё равно работает, но только превращает картинки в стикеры.
+
+Шрифт `fonts/DejaVuSans-Bold.ttf` — [DejaVu Fonts](https://dejavu-fonts.github.io/), свободная лицензия.
