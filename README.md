@@ -5,11 +5,10 @@
 ## Запуск на Render
 
 1. Создайте бота у [@BotFather](https://t.me/BotFather) и скопируйте токен.
-2. На Render создайте **Web Service** из этого репозитория:
-   - Build command: `pip install -r requirements.txt`
-   - Start command: `gunicorn main:app`
-3. В Environment добавьте переменную `BOT_TOKEN` с токеном.
-4. Задеплойте. Вебхук настроится автоматически (Render сам передаёт `RENDER_EXTERNAL_URL`).
+2. На [render.com](https://render.com) нажмите **New → Blueprint** и выберите этот репозиторий.
+   Настройки сборки и запуска Render возьмёт из `render.yaml`.
+3. Вставьте токен в поле `BOT_TOKEN` и нажмите **Apply**.
+4. Вебхук настроится автоматически (Render сам передаёт `RENDER_EXTERNAL_URL`).
 
 ## Переменные окружения
 
