@@ -1,18 +1,15 @@
 import hashlib
-import io
 import os
 
 import requests
 from flask import Flask, abort, request
-from PIL import Image
+
+import ai
+import stickers
 
 app = Flask(__name__)
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not configured")
-
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 TELEGRAM_FILE_API = f"https://api.telegram.org/file/bot{BOT_TOKEN}"
 
@@ -22,21 +19,26 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET") or hashlib.sha256(
     BOT_TOKEN.encode()
 ).hexdigest()
 
-STICKER_SIZE = 512
-
 START_TEXT = (
-    "🤖 Привет! Я бот для создания Telegram-стикеров.\n\n"
-    "Пришли мне картинку (фото или файлом) — "
-    "и я превращу её в стикер 512×512.\n\n"
-    "Совет: отправляй PNG с прозрачным фоном файлом, "
-    "тогда прозрачность сохранится."
+    "🤖 Привет! Я делаю стикеры.\n\n"
+    "Что можно прислать:\n"
+    "• просто картинку — сделаю из неё стикер;\n"
+    "• картинку с подписью, что изменить — "
+    "«сделай аниме, фон космос, надпись \"Привет\"»;\n"
+    "• только текст — нарисую стикер с нуля: "
+    "«кот в очках, без фона, надпись \"Йо\"».\n\n"
+    "/help — подробнее"
 )
 
 HELP_TEXT = (
-    "Команды:\n"
-    "/start — приветствие\n"
-    "/help — эта справка\n\n"
-    "Просто отправь изображение, и я верну его в виде стикера."
+    "Как пользоваться:\n\n"
+    "1. Отправь фото и в подписи напиши, что нужно:\n"
+    "   — стиль или персонаж: аниме, мультфильм, супергерой, пиксель-арт…\n"
+    "   — фон: «фон море», «без фона»\n"
+    "   — надпись: надпись \"Текст\"\n\n"
+    "2. Или напиши только текст — я нарисую стикер с нуля.\n\n"
+    "3. Картинка без подписи станет стикером как есть.\n\n"
+    "Совет: PNG с прозрачным фоном лучше отправлять файлом."
 )
 
 
@@ -46,7 +48,11 @@ def telegram(method, **kwargs):
 
 
 def send_message(chat_id, text):
-    telegram("sendMessage", json={"chat_id": chat_id, "text": text})
+    return telegram("sendMessage", json={"chat_id": chat_id, "text": text})
+
+
+def delete_message(chat_id, message_id):
+    telegram("deleteMessage", json={"chat_id": chat_id, "message_id": message_id})
 
 
 def download_file(file_id):
@@ -55,22 +61,6 @@ def download_file(file_id):
     response = requests.get(f"{TELEGRAM_FILE_API}/{file_path}", timeout=30)
     response.raise_for_status()
     return response.content
-
-
-def make_sticker(image_bytes):
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
-    # Одна сторона должна быть ровно 512, другая — не больше 512.
-    scale = STICKER_SIZE / max(image.size)
-    new_size = (
-        max(1, round(image.width * scale)),
-        max(1, round(image.height * scale)),
-    )
-    image = image.resize(new_size, Image.LANCZOS)
-
-    output = io.BytesIO()
-    image.save(output, format="WEBP")
-    output.seek(0)
-    return output
 
 
 def send_sticker(chat_id, sticker_file):
@@ -93,9 +83,63 @@ def get_image_file_id(message):
     return None
 
 
+def build_prompt(params, has_photo):
+    prompt = params["edit"]
+    if not has_photo:
+        prompt = f"{prompt}, sticker style illustration, bold clean outlines"
+    if params["remove_background"]:
+        prompt = f"{prompt}, isolated on a plain pure white background"
+    return prompt
+
+
+def create_sticker(chat_id, text, file_id):
+    photo = stickers.open_image(download_file(file_id)) if file_id else None
+
+    # Картинка без подписи — просто делаем из неё стикер.
+    if photo and not text:
+        send_sticker(chat_id, stickers.make_sticker(photo))
+        return
+
+    params = ai.parse_request(text, has_photo=bool(photo))
+    image = photo
+
+    # У обычного фото фон неоднородный: сначала просим нейросеть заменить его на белый.
+    if photo and params["remove_background"] and not params["edit"]:
+        params["edit"] = "keep the main subject exactly as it is"
+
+    needs_ai = bool(params["edit"]) or not photo
+    if needs_ai:
+        if not ai.ai_configured():
+            send_message(chat_id, "😔 Нейросеть пока не подключена — могу только сделать стикер из картинки.")
+            return
+
+        if not params["edit"]:
+            params["edit"] = text
+
+        status = send_message(chat_id, "🎨 Рисую, подожди немного…")
+        try:
+            result = ai.generate_image(
+                build_prompt(params, has_photo=bool(photo)),
+                photo_png=stickers.to_png_bytes(photo, max_side=1024) if photo else None,
+                photo_png_small=stickers.to_png_bytes(photo, max_side=ai.CF_INPUT_MAX_SIDE) if photo else None,
+            )
+        except ai.AIUnavailable:
+            send_message(chat_id, "😔 Все нейросети сейчас заняты или закончился дневной лимит. Попробуй позже.")
+            return
+        finally:
+            if status.get("ok"):
+                delete_message(chat_id, status["result"]["message_id"])
+        image = stickers.open_image(result)
+
+    if params["remove_background"]:
+        image = stickers.remove_plain_background(image)
+
+    send_sticker(chat_id, stickers.make_sticker(image, params["caption"]))
+
+
 def handle_message(message):
     chat_id = message["chat"]["id"]
-    text = message.get("text", "")
+    text = (message.get("text") or message.get("caption") or "").strip()
 
     if text.startswith("/start"):
         send_message(chat_id, START_TEXT)
@@ -106,43 +150,40 @@ def handle_message(message):
         return
 
     file_id = get_image_file_id(message)
-    if file_id:
-        try:
-            sticker = make_sticker(download_file(file_id))
-        except Exception as error:
-            print("Sticker error:", repr(error))
-            send_message(chat_id, "😔 Не получилось обработать картинку.")
-            return
-        send_sticker(chat_id, sticker)
-        return
-
-    send_message(chat_id, "Пришли мне картинку, и я сделаю из неё стикер. /help")
-
-
-def set_webhook():
-    base_url = os.environ.get("WEBHOOK_URL") or os.environ.get("RENDER_EXTERNAL_URL")
-
-    if not base_url:
-        print("WEBHOOK_URL / RENDER_EXTERNAL_URL not set, webhook not configured")
+    if not file_id and not text:
+        send_message(chat_id, "Пришли картинку или напиши, какой стикер нарисовать. /help")
         return
 
     try:
-        result = telegram(
-            "setWebhook",
-            json={
-                "url": f"{base_url.rstrip('/')}/webhook",
-                "secret_token": WEBHOOK_SECRET,
-                "allowed_updates": ["message"],
-            },
-        )
-        print("Webhook:", result)
-    except requests.RequestException as error:
-        print("Webhook error:", repr(error))
+        create_sticker(chat_id, text, file_id)
+    except Exception as error:
+        print("Sticker error:", repr(error))
+        send_message(chat_id, "😔 Что-то пошло не так. Попробуй ещё раз или другую картинку.")
 
 
 @app.route("/", methods=["GET"])
 def home():
     return "Telegram sticker bot is running!"
+
+
+@app.route("/setup", methods=["GET"])
+def setup():
+    """Открой эту страницу один раз после запуска, чтобы подключить бота к Telegram."""
+    if not BOT_TOKEN:
+        return "Не задан BOT_TOKEN в настройках хостинга.", 500
+
+    base_url = os.environ.get("WEBHOOK_URL") or f"https://{request.host}"
+    result = telegram(
+        "setWebhook",
+        json={
+            "url": f"{base_url.rstrip('/')}/webhook",
+            "secret_token": WEBHOOK_SECRET,
+            "allowed_updates": ["message"],
+        },
+    )
+    if result.get("ok"):
+        return "✅ Бот подключён! Напиши ему в Telegram /start"
+    return f"❌ Ошибка Telegram: {result.get('description')}", 500
 
 
 @app.route("/webhook", methods=["POST"])
@@ -157,11 +198,6 @@ def webhook():
         handle_message(message)
 
     return "OK"
-
-
-# Вызывается при импорте, чтобы вебхук ставился и под gunicorn
-# (там блок __main__ не выполняется).
-set_webhook()
 
 
 if __name__ == "__main__":
