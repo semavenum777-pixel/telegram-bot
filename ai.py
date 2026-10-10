@@ -103,12 +103,14 @@ def parse_request(text, has_photo):
 
 # ---------- генерация картинок ----------
 
-def _cloudflare_image(prompt, photo_png):
+def _cloudflare_image(prompt, photo_png, seed):
     files = {
         "prompt": (None, prompt),
         "width": (None, str(IMAGE_SIZE)),
         "height": (None, str(IMAGE_SIZE)),
     }
+    if seed is not None:
+        files["seed"] = (None, str(seed))
     if photo_png:
         files["input_image_0"] = ("photo.png", photo_png, "image/png")
 
@@ -149,11 +151,11 @@ def _pollinations_image(prompt, photo_png):
     return image.content
 
 
-def generate_image(prompt, photo_png=None, photo_png_small=None):
+def generate_image(prompt, photo_png=None, photo_png_small=None, seed=None):
     """Возвращает картинку (bytes) от первого сработавшего сервиса."""
     providers = []
     if CF_ACCOUNT_ID and CF_API_TOKEN:
-        providers.append(("Cloudflare", lambda: _cloudflare_image(prompt, photo_png_small)))
+        providers.append(("Cloudflare", lambda: _cloudflare_image(prompt, photo_png_small, seed)))
     if POLLINATIONS_KEY:
         providers.append(("Pollinations", lambda: _pollinations_image(prompt, photo_png)))
 
