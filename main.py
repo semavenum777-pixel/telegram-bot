@@ -169,7 +169,7 @@ def render(chat_id, user_id, origin, style=None, seed=None):
 
     image = photo
     if params["edit"] or not photo:
-        if not ai.ai_configured():
+        if not ai.ai_configured(has_photo=bool(photo)):
             send_message(chat_id, "😔 Нейросеть пока не подключена — могу только сделать стикер из картинки.")
             return
 
