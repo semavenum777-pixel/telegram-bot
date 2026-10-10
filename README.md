@@ -9,8 +9,15 @@
 Под каждым стикером кнопки «🔄 Ещё вариант» и «➕ В мой пак» (бот собирает личный
 стикерпак пользователя). Фото без подписи — бот предлагает готовые стили кнопками.
 
-Нейросети бесплатные и перебираются по очереди: сначала Cloudflare Workers AI
-(~300 картинок в день бесплатно), при ошибке или исчерпанном лимите — Pollinations.
+Нейросети бесплатные и перебираются по очереди. Если у одной закончился лимит или она
+не ответила, бот сразу переходит к следующей (а исчерпавшую лимит пропускает 30 минут):
+
+1. **Cloudflare Workers AI** — ~300 картинок в день, умеет менять фото;
+2. **Google Gemini** — умеет менять фото (если бесплатный тариф доступен для вашего ключа);
+3. **Pollinations** — небольшой бесплатный баланс, умеет менять фото;
+4. **Kandinsky (Сбер, FusionBrain)** — рисует только по тексту.
+
+Подключена та нейросеть, ключи которой заданы в настройках. Достаточно одной.
 
 ## Запуск (всё бесплатно, без карты)
 
@@ -23,8 +30,12 @@
 3. Скопируйте **Account ID**.
 4. Нажмите **Create a Workers AI API Token → Create API Token** и скопируйте токен.
 
-### 3. Нейросеть Pollinations (запасная, необязательно)
-Войдите на [enter.pollinations.ai](https://enter.pollinations.ai) через GitHub и создайте ключ `sk_...`.
+### 3. Запасные нейросети (необязательно, любые из списка)
+- **Gemini:** войдите в [aistudio.google.com](https://aistudio.google.com/apikey) и нажмите **Create API key**.
+  Из России сайт открывается только через VPN.
+- **Pollinations:** войдите на [enter.pollinations.ai](https://enter.pollinations.ai) через GitHub и создайте ключ `sk_...`.
+- **Kandinsky:** зарегистрируйтесь на [fusionbrain.ai](https://fusionbrain.ai), откройте раздел **API**
+  и создайте ключ — получите **API key** и **Secret key**.
 
 ### 4. Хостинг Vercel
 1. Войдите на [vercel.com](https://vercel.com) через GitHub.
@@ -49,7 +60,10 @@
 | `BOT_TOKEN` | да | Токен от @BotFather |
 | `CF_ACCOUNT_ID` | для нейросети | Account ID из Cloudflare |
 | `CF_API_TOKEN` | для нейросети | API-токен Workers AI |
+| `GEMINI_API_KEY` | нет | Ключ Google Gemini — запасная нейросеть |
 | `POLLINATIONS_KEY` | нет | Ключ Pollinations — запасная нейросеть |
+| `FUSIONBRAIN_KEY` | нет | API key Kandinsky (FusionBrain) — только рисование по тексту |
+| `FUSIONBRAIN_SECRET` | нет | Secret key Kandinsky (FusionBrain) |
 | `DAILY_LIMIT` | нет | Сколько стикеров через нейросеть в день на человека (по умолчанию 20, работает с Upstash Redis) |
 | `WEBHOOK_SECRET` | нет | Секрет для проверки запросов от Telegram (по умолчанию выводится из токена) |
 
