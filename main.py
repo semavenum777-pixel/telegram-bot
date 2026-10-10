@@ -323,6 +323,37 @@ def safely(handler, update_part, chat_id):
             send_message(chat_id, "😔 Что-то пошло не так. Попробуй ещё раз или другую картинку.")
 
 
+ALLOWED_UPDATES = ["message", "callback_query"]
+_webhook_checked = False
+
+
+def register_webhook():
+    base_url = os.environ.get("WEBHOOK_URL") or f"https://{request.host}"
+    return telegram(
+        "setWebhook",
+        json={
+            "url": f"{base_url.rstrip('/')}/webhook",
+            "secret_token": WEBHOOK_SECRET,
+            "allowed_updates": ALLOWED_UPDATES,
+        },
+    )
+
+
+def ensure_webhook_up_to_date():
+    """После обновлений бота сама включает новые типы событий (например, нажатия кнопок),
+    чтобы не нужно было заново открывать /setup."""
+    global _webhook_checked
+    if _webhook_checked:
+        return
+    _webhook_checked = True
+    try:
+        info = telegram("getWebhookInfo").get("result", {})
+        if set(ALLOWED_UPDATES) - set(info.get("allowed_updates") or ALLOWED_UPDATES):
+            print("Webhook update:", register_webhook())
+    except Exception as error:
+        print("Webhook check error:", repr(error))
+
+
 @app.route("/", methods=["GET"])
 def home():
     return "Telegram sticker bot is running!"
@@ -334,15 +365,7 @@ def setup():
     if not BOT_TOKEN:
         return "Не задан BOT_TOKEN в настройках хостинга.", 500
 
-    base_url = os.environ.get("WEBHOOK_URL") or f"https://{request.host}"
-    result = telegram(
-        "setWebhook",
-        json={
-            "url": f"{base_url.rstrip('/')}/webhook",
-            "secret_token": WEBHOOK_SECRET,
-            "allowed_updates": ["message", "callback_query"],
-        },
-    )
+    result = register_webhook()
     if result.get("ok"):
         return "✅ Бот подключён! Напиши ему в Telegram /start"
     if result.get("error_code") in (401, 404):
@@ -358,6 +381,8 @@ def setup():
 def webhook():
     if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
         abort(403)
+
+    ensure_webhook_up_to_date()
 
     update = request.get_json(silent=True) or {}
     message = update.get("message")
