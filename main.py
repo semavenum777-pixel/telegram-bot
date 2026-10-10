@@ -9,7 +9,7 @@ import stickers
 
 app = Flask(__name__)
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip().strip("'\"")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 TELEGRAM_FILE_API = f"https://api.telegram.org/file/bot{BOT_TOKEN}"
 
@@ -183,6 +183,12 @@ def setup():
     )
     if result.get("ok"):
         return "✅ Бот подключён! Напиши ему в Telegram /start"
+    if result.get("error_code") in (401, 404):
+        return (
+            "❌ Telegram не узнал токен. Проверь BOT_TOKEN в настройках Vercel: "
+            "это должна быть строка вида 1234567890:AAH... из @BotFather. "
+            "После исправления сделай Redeploy и открой /setup снова."
+        ), 500
     return f"❌ Ошибка Telegram: {result.get('description')}", 500
 
 

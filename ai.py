@@ -11,12 +11,12 @@ import re
 
 import requests
 
-CF_ACCOUNT_ID = os.environ.get("CF_ACCOUNT_ID")
-CF_API_TOKEN = os.environ.get("CF_API_TOKEN")
+CF_ACCOUNT_ID = os.environ.get("CF_ACCOUNT_ID", "").strip()
+CF_API_TOKEN = os.environ.get("CF_API_TOKEN", "").strip()
 CF_IMAGE_MODEL = os.environ.get("CF_IMAGE_MODEL", "@cf/black-forest-labs/flux-2-klein-4b")
 CF_TEXT_MODEL = os.environ.get("CF_TEXT_MODEL", "@cf/meta/llama-3.3-70b-instruct-fp8-fast")
 
-POLLINATIONS_KEY = os.environ.get("POLLINATIONS_KEY")
+POLLINATIONS_KEY = os.environ.get("POLLINATIONS_KEY", "").strip()
 POLLINATIONS_MODEL = os.environ.get("POLLINATIONS_MODEL", "black-forest-labs/flux.2-klein-4b")
 POLLINATIONS_API = "https://gen.pollinations.ai/v1"
 
