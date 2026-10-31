@@ -53,8 +53,14 @@ def use_key(key):
         _current.key = previous
 
 
+NO_KEY = "-"  # use_key(NO_KEY): работать только на бесплатных нейросетях, без ключа владельца
+
+
 def _pkey():
-    return getattr(_current, "key", None) or POLLINATIONS_KEY
+    key = getattr(_current, "key", None)
+    if key == NO_KEY:
+        return None
+    return key or POLLINATIONS_KEY
 POLLINATIONS_MODEL = _env("POLLINATIONS_MODEL", "black-forest-labs/flux.2-klein-4b")
 # Модель картинок от OpenAI (как в ChatGPT), доступная через баланс Pollinations.
 POLLINATIONS_GPT_MODEL = _env("POLLINATIONS_GPT_MODEL", "gptimage")

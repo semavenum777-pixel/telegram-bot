@@ -29,11 +29,11 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET") or hashlib.sha256(
 ).hexdigest()
 
 START_TEXT = (
-    "👋 Привет! Я превращаю твои фото в стикеры, аватарки, фото и живые видео с помощью нейросетей.\n\n"
+    "👋 Привет! Я превращаю твои фото в стикеры, аватарки, фотосессии и GIF с помощью нейросетей.\n\n"
     "📸 <b>Пришли селфи</b> — и выбери кнопкой:\n"
     "• 😊 набор из 6 стикеров с твоими эмоциями прямо в твой стикерпак;\n"
     "• 🎌 аниме, 🧸 Pixar, 🧱 LEGO и ещё десяток стилей;\n"
-    "• 📸 фотосессию в Париже или на пляже, 🎬 живое видео, 🎞 GIF.\n\n"
+    "• 📸 фотосессию в Париже или на пляже, ✨ живые стикеры и 🎞 GIF.\n\n"
     "✍️ Или напиши, что нарисовать: «кот в очках, надпись \"Йо\"».\n"
     "😂 Мем: фото с подписью /mem верх | низ."
 )
@@ -216,11 +216,11 @@ BOT_DESCRIPTION = (
     "• Стикеры из селфи: набор из 6 эмоций с твоим лицом сразу в твой стикерпак\n"
     "• Аниме, Pixar, LEGO, комикс и ещё 10+ стилей\n"
     "• Фотосессии: Париж, пляж, деловой портрет\n"
-    "• Живые видео и GIF из фото, мемы, аватарки\n"
+    "• Живые стикеры и GIF из фото, мемы, аватарки\n"
     "• Новогодние стикеры и открытки 🎄\n\n"
     "Нажми «Старт» и пришли селфи 👇"
 )
-BOT_SHORT_DESCRIPTION = "Стикеры, аватарки, фотосессии и живые видео из твоих фото с помощью нейросетей. Бесплатно 🎨"
+BOT_SHORT_DESCRIPTION = "Стикеры, аватарки, фотосессии и GIF из твоих фото с помощью нейросетей. Бесплатно 🎨"
 BOT_COMMANDS = [
     {"command": "start", "description": "Начать"},
     {"command": "sticker", "description": "Стикер из фото (в группе — ответом на фото)"},
@@ -228,8 +228,8 @@ BOT_COMMANDS = [
     {"command": "photo", "description": "Фото с подписью: /photo я на пляже в Майами"},
     {"command": "mypack", "description": "Мой стикерпак"},
     {"command": "invite", "description": "Пригласить друга — больше генераций"},
-    {"command": "connect", "description": "Подключить свой бесплатный баланс для фото и видео"},
-    {"command": "balance", "description": "Мой баланс для фото и видео"},
+    {"command": "connect", "description": "Лучшее качество фотосессий (по желанию)"},
+    {"command": "balance", "description": "Мой баланс для фотосессий"},
     {"command": "models", "description": "Какие нейросети мне доступны бесплатно"},
     {"command": "help", "description": "Как пользоваться"},
 ]
@@ -386,8 +386,8 @@ def video_available(user_id):
     если подключён — только когда хоть одна видео-модель доступна этому пользователю."""
     if not premium_available():
         return False
-    key = premium_key(user_id) if user_id else None
-    return not key or bool(ai.video_models_for_key(key))
+    key = (premium_key(user_id) if user_id else None) or ai.POLLINATIONS_KEY
+    return bool(key) and bool(ai.video_models_for_key(key))
 
 
 def style_keyboard(user_id=None):
@@ -682,7 +682,7 @@ def invite_link(user_id):
 
 
 def invite_keyboard(user_id):
-    text = "Смотри, этот бот делает стикеры, аватарки и живые видео из твоих фото — бесплатно 🔥"
+    text = "Смотри, этот бот делает стикеры, аватарки и фотосессии из твоих фото — бесплатно 🔥"
     url = "https://t.me/share/url?" + urllib.parse.urlencode({"url": invite_link(user_id), "text": text})
     return [[{"text": "📤 Отправить приглашение", "url": url}]]
 
@@ -835,9 +835,8 @@ def premium_key(user_id):
 
 
 CONNECT_TEXT = (
-    "🔗 Фотосессии и живое видео делают мощные нейросети (Nano Banana, GPT Image, видео-модели). "
-    "Они работают на твоём личном бесплатном балансе Pollinations — так каждый пользуется, "
-    "пока не закончится его собственный бесплатный лимит.\n\n"
+    "🔗 По желанию можно подключить свой бесплатный баланс Pollinations — тогда фотосессии "
+    "делает более точная нейросеть (лучше сохраняет лицо), и ты пользуешься своим собственным лимитом.\n\n"
     "Подключение — 1 минута: нужен вход через GitHub."
 )
 
@@ -920,10 +919,8 @@ def make_photo_edit(chat_id, user_id, origin, scene, again_data):
     if not file_id:
         send_message(chat_id, "Не нашёл фото — пришли его ещё раз.")
         return
-    key = premium_key(user_id)
-    if not key:
-        send_connect_prompt(chat_id)
-        return
+    # Подключил свой баланс — его ключ; нет — только бесплатные нейросети (без входа куда-либо).
+    key = premium_key(user_id) or ai.NO_KEY
     if not limits.take(user_id):
         send_limit_reached(chat_id, user_id)
         return
@@ -957,7 +954,9 @@ def make_photo_edit(chat_id, user_id, origin, scene, again_data):
         origin["message_id"],
         keyboard,
         caption=f"📸 Сделано в @{bot_username()} · нейросеть: {ai.last_used['name'] or '—'}"
-        + (out_of_credits_text() if ai.last_used.get("no_credits") and limits.store_enabled() else ""),
+        + (out_of_credits_text() if ai.last_used.get("no_credits") and limits.store_enabled() else "")
+        + ("\n\n💡 Хочешь точнее сходство? /connect — подключи свой бесплатный баланс."
+           if key == ai.NO_KEY and limits.store_enabled() else ""),
     )
 
 
@@ -1280,7 +1279,13 @@ def handle_message(message):
         if key:
             send_message(chat_id, "🤖 Сейчас тебе доступны:\n\n" + ai.free_models_report(key))
         else:
-            send_connect_prompt(chat_id)
+            send_message(
+                chat_id,
+                "🤖 Без подключения всё работает на бесплатной нейросети Cloudflare FLUX.2 klein: "
+                "стикеры, набор эмоций, стили, аватарки и фотосессии. GIF, живые стикеры и мемы — "
+                "без нейросети, без лимитов.\n\n" + CONNECT_TEXT,
+                keyboard=[[{"text": "🔗 Подключить бесплатный баланс", "callback_data": "connect"}]],
+            )
         return
 
     if command in ("/connect", "/balance", "/disconnect") or raw_text.startswith("/start connect"):
