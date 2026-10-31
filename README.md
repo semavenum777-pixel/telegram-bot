@@ -22,7 +22,9 @@
 `google/gemini-2.5-flash-image` через баланс Pollinations (`POLLINATIONS_PHOTO_MODEL`) делает
 реалистичное фото с тем же лицом: пляж, Париж, деловой портрет, модная фотосессия, ретро, космонавт,
 новогодняя фотосессия и т.д. Свой запрос — фото с подписью `/photo я в смокинге на красной дорожке`.
-Если баланс закончился, бот пробует остальные нейросети. Результат можно сразу оживить в видео.
+Бот перебирает несколько моделей Pollinations (Nano Banana, Qwen Image, GPT Image — как в ChatGPT,
+Seedream, FLUX Kontext): какая доступна на вашем балансе, та и сработает; потом — остальные нейросети.
+Под фото написано, какая нейросеть его сделала. Результат можно сразу оживить в видео.
 
 **«🎬 Оживить фото — живое видео»** — видео-нейросеть (Pollinations, по умолчанию `alibaba/wan-2.2-fast`)
 превращает фото в 4-секундное живое видео: человек улыбается, машет, подмигивает, смеётся, танцует.
@@ -115,7 +117,7 @@
 | `BFL_API_KEY` | нет | Ключ Black Forest Labs — запасная нейросеть |
 | `POLLINATIONS_KEY` | нет | Ключ Pollinations — запасная нейросеть (FLUX и GPT Image) |
 | `POLLINATIONS_VIDEO_MODEL` | нет | Видео-модель для «Оживить фото» (по умолчанию `alibaba/wan-2.2-fast`) |
-| `POLLINATIONS_PHOTO_MODEL` | нет | Модель для «Фотосессии» и `/photo` (по умолчанию `google/gemini-2.5-flash-image` — Nano Banana) |
+| `POLLINATIONS_PHOTO_MODELS` | нет | Модели для «Фотосессии» и `/photo` через запятую, пробуются по очереди (по умолчанию Nano Banana, Qwen Image, GPT Image, Seedream, FLUX Kontext, P-Image Edit) |
 | `VIDEO_SECONDS` | нет | Длина живого видео в секундах (по умолчанию 4) |
 | `FUSIONBRAIN_KEY` | нет | API key Kandinsky (FusionBrain) — только рисование по тексту |
 | `FUSIONBRAIN_SECRET` | нет | Secret key Kandinsky (FusionBrain) |

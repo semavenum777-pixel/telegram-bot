@@ -382,7 +382,9 @@ def generate_image(prompt, photo_png=None, photo_png_small=None, seed=None, ref_
         if remaining < 15:
             break
         try:
-            return provider["call"](prompt, photo, min(provider["timeout"], remaining), seed, size)
+            result = provider["call"](prompt, photo, min(provider["timeout"], remaining), seed, size)
+            last_used["name"] = provider["name"]
+            return result
         except LimitReached as error:
             print(f"{provider['name']} limit reached:", error)
             cooldown = NO_CREDITS_COOLDOWN_SECONDS if error.no_credits else EXHAUSTED_COOLDOWN_SECONDS
@@ -529,25 +531,55 @@ def animate_photo(image_bytes, prompt, portrait=True):
 
 # ---------- реалистичный фоторедактор (как Nano Banana) ----------
 
-# Модель Google «Nano Banana» через баланс Pollinations: меняет фото и хорошо сохраняет лицо.
-POLLINATIONS_PHOTO_MODEL = _env("POLLINATIONS_PHOTO_MODEL", "google/gemini-2.5-flash-image")
+# Модели Pollinations для реалистичных фото с тем же лицом — пробуются по очереди.
+# Часть моделей бывает доступна только за купленный баланс: тогда бот просто идёт дальше.
+POLLINATIONS_PHOTO_MODELS = [
+    model.strip() for model in _env(
+        "POLLINATIONS_PHOTO_MODELS",
+        _env("POLLINATIONS_PHOTO_MODEL", "")
+        or "google/gemini-2.5-flash-image,qwen/qwen-image-2.1,openai/gpt-image-1-mini,"
+           "bytedance/seedream-4.0,black-forest-labs/flux.1-kontext-pro,prunaai/p-image-edit",
+    ).split(",") if model.strip()
+]
+PHOTO_MODEL_NAMES = {
+    "google/gemini-2.5-flash-image": "Nano Banana (Google)",
+    "google/gemini-nano-banana-2.1": "Nano Banana 2.1 (Google)",
+    "qwen/qwen-image-2.1": "Qwen Image",
+    "openai/gpt-image-1-mini": "GPT Image (ChatGPT)",
+    "bytedance/seedream-4.0": "Seedream (ByteDance)",
+    "black-forest-labs/flux.1-kontext-pro": "FLUX Kontext",
+    "prunaai/p-image-edit": "P-Image Edit",
+}
 PHOTO_SIZE = 1024
+
+# Какая нейросеть сделала последнюю картинку — показываем пользователю под фото.
+last_used = {"name": ""}
 
 
 def edit_photo(prompt, photo_png, photo_png_small, seed=None):
-    """Реалистичная правка фото. Сначала Nano Banana (Pollinations), потом обычная цепочка нейросетей."""
-    if POLLINATIONS_KEY and POLLINATIONS_PHOTO_MODEL and _exhausted_until.get("Nano Banana", 0) <= time.time():
-        try:
-            return _pollinations_image(
-                prompt, {"large": photo_png, "small": photo_png_small}, 150, seed,
-                size=PHOTO_SIZE, model=POLLINATIONS_PHOTO_MODEL,
-            )
-        except LimitReached as error:
-            print("Nano Banana limit reached:", error)
-            cooldown = NO_CREDITS_COOLDOWN_SECONDS if error.no_credits else EXHAUSTED_COOLDOWN_SECONDS
-            _exhausted_until["Nano Banana"] = time.time() + cooldown
-        except Exception as error:
-            print("Nano Banana failed:", repr(error))
+    """Реалистичная правка фото: модели Pollinations по очереди, потом обычная цепочка нейросетей."""
+    photo = {"large": photo_png, "small": photo_png_small}
+    deadline = time.monotonic() + 170  # остальное время — на запасные нейросети (Vercel даёт 300 с)
+    if POLLINATIONS_KEY:
+        for model in POLLINATIONS_PHOTO_MODELS:
+            group = f"photo:{model}"
+            remaining = deadline - time.monotonic()
+            if remaining < 20:
+                break
+            if _exhausted_until.get(group, 0) > time.time():
+                continue
+            try:
+                result = _pollinations_image(prompt, photo, min(120, remaining), seed, size=PHOTO_SIZE, model=model)
+                last_used["name"] = PHOTO_MODEL_NAMES.get(model, model)
+                return result
+            except LimitReached as error:
+                print(f"{model} limit reached:", error)
+                cooldown = NO_CREDITS_COOLDOWN_SECONDS if error.no_credits else EXHAUSTED_COOLDOWN_SECONDS
+                _exhausted_until[group] = time.time() + cooldown
+            except Exception as error:
+                # 4xx «модель не умеет / нет доступа» — не дёргаем её снова какое-то время.
+                print(f"{model} failed:", repr(error))
+                _exhausted_until[group] = time.time() + EXHAUSTED_COOLDOWN_SECONDS
     return generate_image(prompt, photo_png, photo_png_small, seed=seed, size=PHOTO_SIZE)
 
 
