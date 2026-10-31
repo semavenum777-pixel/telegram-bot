@@ -42,3 +42,21 @@ def take(user_id):
         print("Limit error:", repr(error))
         return True
     return count <= DAILY_LIMIT
+
+
+def first_time(key, ttl=3600):
+    """True, если ключ встречается впервые (общий для всех копий бота, если база подключена)."""
+    if not (REDIS_URL and REDIS_TOKEN):
+        return True
+    try:
+        response = requests.post(
+            f"{REDIS_URL}/pipeline",
+            headers={"Authorization": f"Bearer {REDIS_TOKEN}"},
+            json=[["SET", f"seen:{key}", "1", "NX", "EX", ttl]],
+            timeout=10,
+        )
+        response.raise_for_status()
+        return response.json()[0]["result"] == "OK"
+    except Exception as error:
+        print("Dedupe error:", repr(error))
+        return True

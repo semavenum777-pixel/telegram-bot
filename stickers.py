@@ -1,7 +1,7 @@
 import io
 import os
 
-from PIL import Image, ImageChops, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 STICKER_SIZE = 512
 FONT_PATH = os.path.join(os.path.dirname(__file__), "fonts", "DejaVuSans-Bold.ttf")
@@ -51,6 +51,27 @@ def remove_plain_background(image, threshold=40):
     bbox = alpha.getbbox()
     if bbox:
         result = result.crop(bbox)
+    return result
+
+
+def has_transparency(image):
+    alpha = image.getchannel("A")
+    return alpha.getextrema()[0] < 250
+
+
+def add_outline(image, width=10):
+    """Белая обводка по контуру, как у стикеров Telegram."""
+    image = fit_to_sticker(image)
+    pad = width + 2
+    canvas = Image.new("RGBA", (image.width + 2 * pad, image.height + 2 * pad), (0, 0, 0, 0))
+    canvas.paste(image, (pad, pad))
+
+    alpha = canvas.getchannel("A").point(lambda value: 255 if value > 40 else 0)
+    outline = alpha.filter(ImageFilter.MaxFilter(2 * width + 1)).filter(ImageFilter.GaussianBlur(1))
+
+    result = Image.new("RGBA", canvas.size, (255, 255, 255, 0))
+    result.putalpha(outline)
+    result.alpha_composite(canvas)
     return result
 
 
@@ -105,7 +126,9 @@ def add_caption(image, text):
     return image
 
 
-def make_sticker(image, caption=""):
+def make_sticker(image, caption="", outline=False):
+    if outline and has_transparency(image):
+        image = add_outline(image)
     image = fit_to_sticker(image)
     if caption:
         image = add_caption(image, caption)
