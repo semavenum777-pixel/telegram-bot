@@ -32,16 +32,31 @@ def take(user_id):
         response = requests.post(
             f"{REDIS_URL}/pipeline",
             headers={"Authorization": f"Bearer {REDIS_TOKEN}"},
-            json=[["INCR", key], ["EXPIRE", key, 2 * 24 * 3600]],
+            json=[["INCR", key], ["EXPIRE", key, 2 * 24 * 3600], ["GET", f"bonus:{user_id}"], ["INCR", "stats:gens"]],
             timeout=10,
         )
         response.raise_for_status()
-        count = response.json()[0]["result"]
+        results = response.json()
+        count = results[0]["result"]
+        bonus = int(results[2]["result"] or 0)
     except Exception as error:
         # Если база недоступна, не мешаем пользоваться ботом.
         print("Limit error:", repr(error))
         return True
-    return count <= DAILY_LIMIT
+    return count <= daily_limit(bonus)
+
+
+# За каждого приглашённого друга — столько генераций в день сверху (но не больше BONUS_CAP).
+BONUS_PER_FRIEND = int(os.environ.get("BONUS_PER_FRIEND", "5"))
+BONUS_CAP = int(os.environ.get("BONUS_CAP", "50"))
+
+
+def daily_limit(bonus=0):
+    return DAILY_LIMIT + min(int(bonus or 0), BONUS_CAP)
+
+
+def user_limit(user_id):
+    return daily_limit(load(f"bonus:{user_id}") or 0)
 
 
 def first_time(key, ttl=3600):
@@ -98,3 +113,55 @@ def load(key):
 def remove(key):
     if store_enabled():
         _redis(["DEL", key])
+
+
+# ---------- пользователи, статистика, приглашения ----------
+
+def track_user(user_id):
+    """Запоминает пользователя. True, если он пишет боту впервые."""
+    if not store_enabled():
+        return False
+    try:
+        return _redis(["SADD", "users", str(user_id)])[0] == 1
+    except Exception as error:
+        print("Track error:", repr(error))
+        return False
+
+
+def stats():
+    """(сколько людей пользовались ботом, сколько сделано генераций) или None без базы."""
+    if not store_enabled():
+        return None
+    try:
+        users, gens = _redis(["SCARD", "users"], ["GET", "stats:gens"])
+        return int(users or 0), int(gens or 0)
+    except Exception as error:
+        print("Stats error:", repr(error))
+        return None
+
+
+def reward_referrer(referrer_id, new_user_id):
+    """Новый пользователь пришёл по приглашению — пригласившему бонус. True, если начислено."""
+    if not store_enabled() or str(referrer_id) == str(new_user_id):
+        return False
+    try:
+        added, _ = _redis(
+            ["SET", f"invited:{new_user_id}", str(referrer_id), "NX"],
+            ["SADD", f"friends:{referrer_id}", str(new_user_id)],
+        )
+        if added != "OK":
+            return False
+        _redis(["INCRBY", f"bonus:{referrer_id}", BONUS_PER_FRIEND])
+        return True
+    except Exception as error:
+        print("Referral error:", repr(error))
+        return False
+
+
+def friends_count(user_id):
+    if not store_enabled():
+        return 0
+    try:
+        return int(_redis(["SCARD", f"friends:{user_id}"])[0] or 0)
+    except Exception:
+        return 0
