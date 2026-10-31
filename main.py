@@ -60,7 +60,9 @@ HELP_TEXT = (
     "➕ В мой пак — добавить в твой личный стикерпак.\n\n"
     "Можно прислать и готовый стикер — переделаю его в другом стиле.\n\n"
     "🖼 Аватарка — кнопка под фото: картинка для профиля в выбранном стиле.\n"
-    "😂 Мем — пришли фото с подписью /mem Верх | Низ.\n"
+    "😂 Мем — пришли фото с подписью /mem Верх | Низ (работает и с гифками).\n"
+    "✨ Оживить — под стикером: сделаю живой стикер, а кнопкой 🎞 GIF — гифку.\n"
+    "🎞 Пришли гифку — сделаю из неё живой стикер для пака.\n"
     "👥 В группе — добавь меня в чат и ответь на фото командой /sticker (или /sticker аниме).\n"
     "/mypack — ссылка на твой стикерпак."
 ) + (f"\n\nВ день можно сделать до {limits.DAILY_LIMIT} стикеров через нейросеть." if limits.enabled() else "")
@@ -267,6 +269,32 @@ def send_photo(chat_id, photo_file, reply_to=None, keyboard=None, caption=None):
     )
 
 
+def send_animation(chat_id, gif_bytes, reply_to=None, caption=None):
+    data = {"chat_id": chat_id}
+    if caption:
+        data["caption"] = caption
+    if reply_to:
+        data["reply_parameters"] = json.dumps(
+            {"message_id": reply_to, "allow_sending_without_reply": True}
+        )
+    return telegram(
+        "sendAnimation",
+        data=data,
+        files={"animation": ("animation.gif", gif_bytes, "image/gif")},
+    )
+
+
+def get_animation_file_id(message):
+    """GIF или короткое видео в сообщении (Telegram присылает GIF как mp4 в поле animation)."""
+    for key in ("animation", "video", "video_note"):
+        if message.get(key):
+            return message[key]["file_id"]
+    document = message.get("document") or {}
+    if document.get("mime_type") in ("image/gif", "video/mp4", "video/webm"):
+        return document["file_id"]
+    return None
+
+
 def split_command(text):
     """'/sticker@my_bot аниме' → ('/sticker', 'аниме', 'my_bot')."""
     if not text.startswith("/"):
@@ -282,7 +310,7 @@ def get_image_file_id(message):
         return photos[-1]["file_id"]  # самое большое разрешение
 
     document = message.get("document")
-    if document and document.get("mime_type", "").startswith("image/"):
+    if document and document.get("mime_type", "").startswith("image/") and document["mime_type"] != "image/gif":
         return document["file_id"]
 
     sticker = message.get("sticker")
@@ -646,9 +674,43 @@ def animate_sticker(chat_id, message, effect=None):
         chat_id,
         video,
         source["message_id"],
-        [[{"text": "🔄 Другая анимация", "callback_data": "anim"}], [PACK_BUTTON]],
+        [
+            [{"text": "🔄 Другая анимация", "callback_data": "anim"}, {"text": "🎞 GIF", "callback_data": f"gif:{effect}"}],
+            [PACK_BUTTON],
+        ],
         video=True,
     )
+
+
+def send_gif_version(chat_id, message, effect):
+    """🎞 GIF: та же анимация обычным GIF-файлом — его можно сохранить и отправить куда угодно."""
+    source = message.get("reply_to_message") or {}
+    sticker = source.get("sticker")
+    if effect not in animate.EFFECTS or not sticker or sticker.get("is_video"):
+        send_message(chat_id, "Не нашёл исходный стикер — оживи его ещё раз.")
+        return
+    telegram("sendChatAction", json={"chat_id": chat_id, "action": "upload_video"})
+    image = stickers.open_image(download_file(sticker["file_id"]))
+    send_animation(chat_id, animate.make_gif(image, effect), message["message_id"], f"🎞 Сделано в @{bot_username()}")
+
+
+def gif_to_sticker(chat_id, source):
+    """Гифка → живой стикер для пака."""
+    telegram("sendChatAction", json={"chat_id": chat_id, "action": "choose_sticker"})
+    video = animate.video_to_sticker(download_file(get_animation_file_id(source)))
+    send_sticker(chat_id, video, source["message_id"], [[PACK_BUTTON]], video=True)
+
+
+def make_meme_gif_from(chat_id, source, args, reply_to):
+    top, sep, bottom = args.partition("|")
+    if not sep:
+        top, bottom = "", top
+    if not (top.strip() or bottom.strip()):
+        send_message(chat_id, "Напиши текст мема: /mem Текст сверху | Текст снизу", reply_to=reply_to)
+        return
+    telegram("sendChatAction", json={"chat_id": chat_id, "action": "upload_video"})
+    gif = animate.make_meme_gif(download_file(get_animation_file_id(source)), top.strip(), bottom.strip())
+    send_animation(chat_id, gif, source["message_id"], f"😂 Мемы и стикеры — @{bot_username()}")
 
 
 def caption_sticker(chat_id, sticker_message, caption):
@@ -721,6 +783,10 @@ def handle_callback(query):
         animate_sticker(chat_id, message)
         return
 
+    if data.startswith("gif:"):
+        send_gif_version(chat_id, message, data.partition(":")[2])
+        return
+
     if data.startswith("cap:"):
         index = data.partition(":")[2]
         if message.get("sticker") and index.isdigit() and int(index) < len(QUICK_CAPTIONS):
@@ -766,6 +832,10 @@ def handle_sticker_command(message, args):
     """/sticker в группе или в личке: ответом на фото, с подписью к фото или с текстом."""
     chat_id = message["chat"]["id"]
     replied = message.get("reply_to_message") or {}
+    for candidate in (message, replied):
+        if get_animation_file_id(candidate):
+            gif_to_sticker(chat_id, candidate)
+            return
     if get_image_file_id(message):
         source = message
     elif get_image_file_id(replied):
@@ -798,6 +868,10 @@ def handle_message(message):
         handle_sticker_command(message, args)
         return
     if command == "/mem":
+        for candidate in (message, replied):
+            if get_animation_file_id(candidate):
+                make_meme_gif_from(chat_id, candidate, args, message["message_id"])
+                return
         source = message if get_image_file_id(message) else replied
         if not get_image_file_id(source):
             send_message(chat_id, "Ответь командой /mem на фото или пришли фото с подписью /mem Верх | Низ")
@@ -835,6 +909,11 @@ def handle_message(message):
 
     if text and is_our_sticker(replied):
         caption_sticker(chat_id, replied, text)
+        return
+
+    if get_animation_file_id(message) and not text:
+        gif_to_sticker(chat_id, message)
+        send_message(chat_id, "💡 Хочешь мем-GIF? Пришли эту гифку с подписью /mem Текст сверху | Текст снизу")
         return
 
     file_id = get_image_file_id(message)
