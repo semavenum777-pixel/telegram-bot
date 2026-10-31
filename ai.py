@@ -9,7 +9,9 @@
 import base64
 import json
 import os
+import contextlib
 import re
+import threading
 import time
 
 import requests
@@ -33,6 +35,26 @@ GEMINI_TEXT_MODEL = _env("GEMINI_TEXT_MODEL", "gemini-2.5-flash-lite")
 GEMINI_API = "https://generativelanguage.googleapis.com/v1beta/models"
 
 POLLINATIONS_KEY = _env("POLLINATIONS_KEY")
+# Необязательный публичный ключ приложения (pk_...): с ним на экране подтверждения видно имя бота.
+POLLINATIONS_APP_KEY = _env("POLLINATIONS_APP_KEY")
+
+# Личный ключ пользователя, который подключил свой аккаунт Pollinations (действует внутри запроса).
+_current = threading.local()
+
+
+@contextlib.contextmanager
+def use_key(key):
+    """Внутри блока запросы к Pollinations идут с ключом пользователя — тратится его баланс."""
+    previous = getattr(_current, "key", None)
+    _current.key = key
+    try:
+        yield
+    finally:
+        _current.key = previous
+
+
+def _pkey():
+    return getattr(_current, "key", None) or POLLINATIONS_KEY
 POLLINATIONS_MODEL = _env("POLLINATIONS_MODEL", "black-forest-labs/flux.2-klein-4b")
 # Модель картинок от OpenAI (как в ChatGPT), доступная через баланс Pollinations.
 POLLINATIONS_GPT_MODEL = _env("POLLINATIONS_GPT_MODEL", "gptimage")
@@ -176,7 +198,7 @@ def _gemini_image(prompt, photo, timeout, seed, size=IMAGE_SIZE):
 
 def _pollinations_image(prompt, photo, timeout, seed, size=IMAGE_SIZE, model=None):
     model = model or POLLINATIONS_MODEL
-    headers = {"Authorization": f"Bearer {POLLINATIONS_KEY}"}
+    headers = {"Authorization": f"Bearer {_pkey()}"}
     size = f"{size}x{size}"
     if photo:
         response = requests.post(
@@ -333,10 +355,10 @@ PROVIDERS = [
         for service in EXTRA_SERVICES
     ],
     {"name": "Pollinations FLUX", "group": "Pollinations", "photo": True, "timeout": 90,
-     "call": _pollinations_image, "enabled": lambda: bool(POLLINATIONS_KEY)},
+     "call": _pollinations_image, "enabled": lambda: bool(_pkey())},
     {"name": "Pollinations GPT Image", "group": "Pollinations", "photo": True, "timeout": 120,
      "call": lambda *a: _pollinations_image(*a, model=POLLINATIONS_GPT_MODEL),
-     "enabled": lambda: bool(POLLINATIONS_KEY and POLLINATIONS_GPT_MODEL)},
+     "enabled": lambda: bool(_pkey() and POLLINATIONS_GPT_MODEL)},
     {"name": "Cloudflare FLUX.1 schnell", "group": "Cloudflare", "photo": False, "timeout": 60,
      "call": _cloudflare_schnell, "enabled": lambda: bool(CF_ACCOUNT_ID and CF_API_TOKEN and CF_TEXT_ONLY_MODEL)},
     {"name": "Kandinsky", "group": "Kandinsky", "photo": False, "timeout": 90,
@@ -481,7 +503,7 @@ POLLINATIONS_MEDIA = "https://media.pollinations.ai"
 
 
 def video_configured():
-    return bool(POLLINATIONS_KEY)
+    return bool(_pkey())
 
 
 def _upload_to_pollinations(image_bytes):
@@ -489,7 +511,7 @@ def _upload_to_pollinations(image_bytes):
     Ссылка не публикуется в галереях, но доступна тому, кто её знает; файл удаляется через 30 дней."""
     response = requests.post(
         f"{POLLINATIONS_MEDIA}/upload",
-        headers={"Authorization": f"Bearer {POLLINATIONS_KEY}"},
+        headers={"Authorization": f"Bearer {_pkey()}"},
         files={"file": ("photo.jpg", image_bytes, "image/jpeg")},
         timeout=60,
     )
@@ -505,7 +527,7 @@ def animate_photo(image_bytes, prompt, portrait=True):
         url = _upload_to_pollinations(image_bytes)
         response = requests.get(
             f"https://gen.pollinations.ai/video/{requests.utils.quote(prompt, safe='')}",
-            headers={"Authorization": f"Bearer {POLLINATIONS_KEY}"},
+            headers={"Authorization": f"Bearer {_pkey()}"},
             params={
                 "model": POLLINATIONS_VIDEO_MODEL,
                 "image": url,
@@ -560,9 +582,12 @@ def edit_photo(prompt, photo_png, photo_png_small, seed=None):
     """Реалистичная правка фото: модели Pollinations по очереди, потом обычная цепочка нейросетей."""
     photo = {"large": photo_png, "small": photo_png_small}
     deadline = time.monotonic() + 170  # остальное время — на запасные нейросети (Vercel даёт 300 с)
-    if POLLINATIONS_KEY:
+    key = _pkey()
+    last_used["no_credits"] = False
+    if key:
+        refused = 0
         for model in POLLINATIONS_PHOTO_MODELS:
-            group = f"photo:{model}"
+            group = f"photo:{model}:{key[-8:]}"  # у каждого ключа свой баланс и свой доступ
             remaining = deadline - time.monotonic()
             if remaining < 20:
                 break
@@ -574,13 +599,53 @@ def edit_photo(prompt, photo_png, photo_png_small, seed=None):
                 return result
             except LimitReached as error:
                 print(f"{model} limit reached:", error)
+                refused += error.no_credits
                 cooldown = NO_CREDITS_COOLDOWN_SECONDS if error.no_credits else EXHAUSTED_COOLDOWN_SECONDS
                 _exhausted_until[group] = time.time() + cooldown
             except Exception as error:
                 # 4xx «модель не умеет / нет доступа» — не дёргаем её снова какое-то время.
                 print(f"{model} failed:", repr(error))
                 _exhausted_until[group] = time.time() + EXHAUSTED_COOLDOWN_SECONDS
+        # Все модели ответили «нет баланса» — скорее всего, бесплатный баланс закончился.
+        last_used["no_credits"] = refused > 0
     return generate_image(prompt, photo_png, photo_png_small, seed=seed, size=PHOTO_SIZE)
+
+
+# ---------- подключение личного аккаунта Pollinations (Connect User Wallets) ----------
+
+POLLINATIONS_AUTH = "https://enter.pollinations.ai/api"
+
+
+def start_connect():
+    """Шаг 1: получить ссылку, по которой пользователь разрешит боту тратить его баланс."""
+    payload = {"client_id": POLLINATIONS_APP_KEY} if POLLINATIONS_APP_KEY else {}
+    response = requests.post(f"{POLLINATIONS_AUTH}/device/code", json=payload, timeout=20)
+    response.raise_for_status()
+    return response.json()
+
+
+def finish_connect(device_code):
+    """Шаг 2: забрать личный ключ. Возвращает (ключ или None, ошибка или None)."""
+    response = requests.post(f"{POLLINATIONS_AUTH}/device/token", json={"device_code": device_code}, timeout=20)
+    data = response.json()
+    if response.status_code == 200 and data.get("access_token"):
+        return data["access_token"], None
+    return None, data.get("error") or f"HTTP {response.status_code}"
+
+
+def pollen_balance(key):
+    """Сколько Pollen осталось у ключа пользователя (или None, если не удалось узнать)."""
+    try:
+        response = requests.get(
+            "https://gen.pollinations.ai/account/balance",
+            headers={"Authorization": f"Bearer {key}"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        return response.json().get("balance")
+    except Exception as error:
+        print("Balance error:", repr(error))
+        return None
 
 
 def translate_request(text):

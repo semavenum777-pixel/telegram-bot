@@ -60,3 +60,41 @@ def first_time(key, ttl=3600):
     except Exception as error:
         print("Dedupe error:", repr(error))
         return True
+
+
+# ---------- хранилище личных ключей пользователей ----------
+
+def store_enabled():
+    """Есть ли база, где можно хранить данные пользователей (Upstash Redis)."""
+    return bool(REDIS_URL and REDIS_TOKEN)
+
+
+def _redis(*commands):
+    response = requests.post(
+        f"{REDIS_URL}/pipeline",
+        headers={"Authorization": f"Bearer {REDIS_TOKEN}"},
+        json=list(commands),
+        timeout=10,
+    )
+    response.raise_for_status()
+    return [item.get("result") for item in response.json()]
+
+
+def save(key, value, ttl):
+    if store_enabled():
+        _redis(["SET", key, value, "EX", int(ttl)])
+
+
+def load(key):
+    if not store_enabled():
+        return None
+    try:
+        return _redis(["GET", key])[0]
+    except Exception as error:
+        print("Store read error:", repr(error))
+        return None
+
+
+def remove(key):
+    if store_enabled():
+        _redis(["DEL", key])
