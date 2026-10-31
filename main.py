@@ -269,8 +269,10 @@ def send_photo(chat_id, photo_file, reply_to=None, keyboard=None, caption=None):
     )
 
 
-def send_animation(chat_id, gif_bytes, reply_to=None, caption=None):
+def send_animation(chat_id, gif_bytes, reply_to=None, caption=None, keyboard=None):
     data = {"chat_id": chat_id}
+    if keyboard:
+        data["reply_markup"] = json.dumps({"inline_keyboard": keyboard})
     if caption:
         data["caption"] = caption
     if reply_to:
@@ -350,6 +352,7 @@ def style_keyboard():
     ])
     rows.append([
         {"text": "🖼 Аватарка", "callback_data": "ava"},
+        {"text": "🎞 GIF", "callback_data": "photogif"},
         {"text": "😂 Мем", "callback_data": "memhint"},
     ])
     return rows
@@ -694,6 +697,24 @@ def send_gif_version(chat_id, message, effect):
     send_animation(chat_id, animate.make_gif(image, effect), message["message_id"], f"🎞 Сделано в @{bot_username()}")
 
 
+def photo_to_gif(chat_id, origin):
+    """🎞 GIF прямо из фото: фото оживает с одним из эффектов (без нейросети, без лимитов)."""
+    file_id = get_image_file_id(origin)
+    if not file_id:
+        send_message(chat_id, "Не нашёл фото — пришли его ещё раз.")
+        return
+    telegram("sendChatAction", json={"chat_id": chat_id, "action": "upload_video"})
+    image = stickers.open_image(download_file(file_id))
+    effect = random.choice(list(animate.EFFECTS))
+    send_animation(
+        chat_id,
+        animate.make_gif(image, effect),
+        origin["message_id"],
+        f"🎞 {animate.EFFECTS[effect]} · @{bot_username()}",
+        [[{"text": "🔄 Другой эффект", "callback_data": "photogif"}]],
+    )
+
+
 def gif_to_sticker(chat_id, source):
     """Гифка → живой стикер для пака."""
     telegram("sendChatAction", json={"chat_id": chat_id, "action": "choose_sticker"})
@@ -804,6 +825,10 @@ def handle_callback(query):
 
     if data in EMOTION_SETS:
         make_emotion_pack(chat_id, user, origin, kind=data)
+        return
+
+    if data == "photogif":
+        photo_to_gif(chat_id, origin)
         return
 
     if data == "ava":
