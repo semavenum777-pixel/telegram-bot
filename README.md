@@ -55,6 +55,21 @@
 - **Kandinsky:** зарегистрируйтесь на [fusionbrain.ai](https://fusionbrain.ai), откройте раздел **API**
   и создайте ключ — получите **API key** и **Secret key**.
 
+### Платные модели со стартовым бонусом (необязательно)
+Любой сервис со стандартом OpenAI Images API (OpenAI, Together AI и другие) подключается
+без изменения кода — добавьте в Vercel до 5 наборов переменных:
+
+| Переменная | Пример |
+|---|---|
+| `EXTRA1_URL` | `https://api.openai.com/v1` |
+| `EXTRA1_KEY` | ключ сервиса |
+| `EXTRA1_MODEL` | `gpt-image-1` |
+| `EXTRA1_SIZE` | необязательно, например `1024x1024` |
+
+Следующий сервис — `EXTRA2_URL`, `EXTRA2_KEY`, `EXTRA2_MODEL` и т.д. Для фото такие сервисы
+пробуются сразу после Gemini и Black Forest Labs. Когда бонус закончится (ответ 402),
+бот перестанет обращаться к сервису на 6 часов и будет работать на бесплатных.
+
 ### 4. Хостинг Vercel
 1. Войдите на [vercel.com](https://vercel.com) через GitHub.
 2. **Add New → Project** → выберите репозиторий `telegram-bot` → **Import**.
