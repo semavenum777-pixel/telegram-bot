@@ -59,6 +59,8 @@ HELP_TEXT = (
     "✍️ Надпись — ответь на стикер текстом, и я допишу его на стикер;\n"
     "➕ В мой пак — добавить в твой личный стикерпак.\n\n"
     "Можно прислать и готовый стикер — переделаю его в другом стиле.\n\n"
+    "📸 Фотосессия — реалистичное фото с твоим лицом: пляж, Париж, деловой портрет… "
+    "Или фото с подписью /photo что сделать.\n"
     "🖼 Аватарка — кнопка под фото: картинка для профиля в выбранном стиле.\n"
     "😂 Мем — пришли фото с подписью /mem Верх | Низ (работает и с гифками).\n"
     "✨ Оживить — под стикером: сделаю живой стикер, а кнопкой 🎞 GIF — гифку.\n"
@@ -173,6 +175,26 @@ VIDEO_STYLE = (
 )
 
 
+# Фотосессии: реалистичные фото с тем же лицом (как Nano Banana). Ключ → (кнопка, сцена).
+PHOTO_SCENES = {
+    "beach": ("🏖 На пляже", "the person relaxing on a beautiful tropical beach at sunset, summer outfit"),
+    "paris": ("🗼 В Париже", "the person standing in Paris with the Eiffel Tower in the background, stylish outfit"),
+    "business": ("💼 Деловой портрет", "a professional business headshot of the person in a sharp suit, studio lighting, neutral background"),
+    "fashion": ("👗 Модная фотосессия", "a high-fashion magazine photoshoot of the person, designer outfit, dramatic studio light"),
+    "retro": ("🎩 Ретро 1920-х", "the person as a 1920s style portrait, vintage clothes and hairstyle, sepia film photo"),
+    "car": ("🏎 Со спорткаром", "the person posing next to a luxury sports car on a city street at night"),
+    "space": ("🚀 Космонавт", "the person as an astronaut in a spacesuit on a space station with Earth in the window"),
+    "winter": ("❄️ Зимняя сказка", "the person in a cozy winter outfit in a snowy forest with soft falling snow"),
+    "newyear": ("🎄 Новогодняя фотосессия", "the person in a festive New Year photoshoot next to a decorated Christmas tree with lights and gifts"),
+    "superhero": ("🦸 Супергерой в кино", "the person as a movie superhero in a cinematic action scene"),
+}
+PHOTO_STYLE = (
+    "Photorealistic photo edit: {scene}. Keep the person's face and identity exactly the same as in the photo: "
+    "same facial features, eyes, nose, mouth, skin tone, hairstyle and hair color. "
+    "High quality, natural lighting, realistic skin, sharp focus."
+)
+
+
 # Быстрые надписи под стикером (без эмодзи — их нет в шрифте).
 QUICK_CAPTIONS = ["Ок", "Спасибо", "Ахах", "Люблю"]
 
@@ -204,6 +226,7 @@ BOT_COMMANDS = [
     {"command": "start", "description": "Начать"},
     {"command": "sticker", "description": "Стикер из фото (в группе — ответом на фото)"},
     {"command": "mem", "description": "Мем: /mem текст сверху | текст снизу"},
+    {"command": "photo", "description": "Фото с подписью: /photo я на пляже в Майами"},
     {"command": "mypack", "description": "Мой стикерпак"},
     {"command": "help", "description": "Как пользоваться"},
 ]
@@ -369,6 +392,7 @@ def style_keyboard():
     ])
     if ai.video_configured():
         rows.insert(0, [{"text": "🎬 Оживить фото — живое видео", "callback_data": "video"}])
+        rows.insert(0, [{"text": "📸 Фотосессия — реалистичное фото", "callback_data": "photo"}])
     rows.append([
         {"text": "🖼 Аватарка", "callback_data": "ava"},
         {"text": "🎞 GIF", "callback_data": "photogif"},
@@ -721,6 +745,54 @@ def video_keyboard():
     return _pairs(buttons)
 
 
+def photo_keyboard():
+    buttons = [{"text": label, "callback_data": f"ph:{key}"} for key, (label, _) in PHOTO_SCENES.items()]
+    rows = _pairs(buttons)
+    rows.append([{"text": "✍️ Свой запрос", "callback_data": "phhint"}])
+    return rows
+
+
+def make_photo_edit(chat_id, user_id, origin, scene, again_data):
+    """📸 Реалистичное фото с тем же лицом (Nano Banana через Pollinations, с запасными нейросетями)."""
+    file_id = get_image_file_id(origin)
+    if not file_id:
+        send_message(chat_id, "Не нашёл фото — пришли его ещё раз.")
+        return
+    if not limits.take(user_id):
+        send_message(chat_id, f"⏳ Лимит на сегодня исчерпан: можно {plural_stickers(limits.DAILY_LIMIT)} в день.")
+        return
+
+    photo = stickers.open_image(download_file(file_id))
+    source = stickers.crop_square(photo)
+    status = send_message(chat_id, "📸 Делаю фото — до минуты…")
+    telegram("sendChatAction", json={"chat_id": chat_id, "action": "upload_photo"})
+    try:
+        result = ai.edit_photo(
+            PHOTO_STYLE.format(scene=scene),
+            stickers.to_png_bytes(source, max_side=1024),
+            stickers.to_png_bytes(source, max_side=ai.CF_INPUT_MAX_SIDE),
+            seed=random.randint(0, 2**31 - 1),
+        )
+    except ai.AIUnavailable:
+        send_message(chat_id, "😔 Нейросети сейчас заняты или закончился баланс. Попробуй позже.")
+        return
+    finally:
+        if status.get("ok"):
+            delete_message(chat_id, status["result"]["message_id"])
+
+    row = [] if again_data == NO_AGAIN else [{"text": "🔄 Ещё вариант", "callback_data": again_data}]
+    if ai.video_configured():
+        row.append({"text": "🎬 Оживить", "callback_data": "video:self"})
+    keyboard = [row] if row else None
+    send_photo(
+        chat_id,
+        stickers.to_jpeg(stickers.open_image(result)),
+        origin["message_id"],
+        keyboard,
+        caption=f"📸 Сделано в @{bot_username()}",
+    )
+
+
 def make_live_video(chat_id, user_id, origin, motion):
     """🎬 Живое видео из фото через видео-нейросеть."""
     file_id = get_image_file_id(origin)
@@ -896,6 +968,10 @@ def handle_callback(query):
         make_emotion_pack(chat_id, user, origin, kind=data)
         return
 
+    if data == "video:self" and message.get("photo"):
+        send_message(chat_id, "🎬 Что должно происходить в видео? 👇", reply_to=message["message_id"], keyboard=video_keyboard())
+        return
+
     if data == "vid2sticker":
         if get_animation_file_id(message):
             gif_to_sticker(chat_id, message)
@@ -903,6 +979,29 @@ def handle_callback(query):
 
     if data == "video":
         send_message(chat_id, "🎬 Что должно происходить в видео? 👇", reply_to=origin["message_id"], keyboard=video_keyboard())
+        return
+
+    if data == "photo":
+        send_message(chat_id, "📸 Выбери фотосессию 👇", reply_to=origin["message_id"], keyboard=photo_keyboard())
+        return
+
+    if data == "phhint":
+        send_message(
+            chat_id,
+            "✍️ Пришли это фото ещё раз с подписью, например:\n"
+            "/photo я в смокинге на красной дорожке\n"
+            "/photo поменяй фон на горы, а футболку на красную",
+        )
+        return
+
+    if data.startswith("ph:") and data[3:] in PHOTO_SCENES:
+        make_photo_edit(chat_id, user["id"], origin, PHOTO_SCENES[data[3:]][1], data)
+        return
+
+    if data == "phcustom":
+        request = message_text(origin).partition(" ")[2] if message_text(origin).startswith("/photo") else ""
+        if request:
+            make_photo_edit(chat_id, user["id"], origin, ai.translate_request(request), "phcustom")
         return
 
     if data.startswith("vid:") and data[4:] in VIDEO_MOTIONS:
@@ -974,6 +1073,19 @@ def handle_message(message):
     if command == "/sticker":
         handle_sticker_command(message, args)
         return
+    if command == "/photo":
+        source = message if get_image_file_id(message) else replied
+        if not get_image_file_id(source) or not args:
+            send_message(chat_id, "Пришли фото с подписью /photo и что сделать, например: /photo я на пляже в Майами")
+            return
+        origin = dict(source)
+        if source is not message:
+            origin = {key: source[key] for key in ("photo", "document") if key in source}
+            origin.update({"message_id": source["message_id"]})
+        again = "phcustom" if source is message else NO_AGAIN
+        make_photo_edit(chat_id, message["from"]["id"], origin, ai.translate_request(args), again)
+        return
+
     if command == "/mem":
         for candidate in (message, replied):
             if get_animation_file_id(candidate):

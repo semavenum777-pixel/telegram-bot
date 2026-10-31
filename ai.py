@@ -525,3 +525,45 @@ def animate_photo(image_bytes, prompt, portrait=True):
     except Exception as error:
         print("Video failed:", repr(error))
         raise AIUnavailable("Video generation failed") from error
+
+
+# ---------- реалистичный фоторедактор (как Nano Banana) ----------
+
+# Модель Google «Nano Banana» через баланс Pollinations: меняет фото и хорошо сохраняет лицо.
+POLLINATIONS_PHOTO_MODEL = _env("POLLINATIONS_PHOTO_MODEL", "google/gemini-2.5-flash-image")
+PHOTO_SIZE = 1024
+
+
+def edit_photo(prompt, photo_png, photo_png_small, seed=None):
+    """Реалистичная правка фото. Сначала Nano Banana (Pollinations), потом обычная цепочка нейросетей."""
+    if POLLINATIONS_KEY and POLLINATIONS_PHOTO_MODEL and _exhausted_until.get("Nano Banana", 0) <= time.time():
+        try:
+            return _pollinations_image(
+                prompt, {"large": photo_png, "small": photo_png_small}, 150, seed,
+                size=PHOTO_SIZE, model=POLLINATIONS_PHOTO_MODEL,
+            )
+        except LimitReached as error:
+            print("Nano Banana limit reached:", error)
+            cooldown = NO_CREDITS_COOLDOWN_SECONDS if error.no_credits else EXHAUSTED_COOLDOWN_SECONDS
+            _exhausted_until["Nano Banana"] = time.time() + cooldown
+        except Exception as error:
+            print("Nano Banana failed:", repr(error))
+    return generate_image(prompt, photo_png, photo_png_small, seed=seed, size=PHOTO_SIZE)
+
+
+def translate_request(text):
+    """Переводит просьбу пользователя в короткую английскую инструкцию для нейросети."""
+    prompt = (
+        "Rewrite this photo editing request as one short clear English instruction for an image model. "
+        "Reply with the instruction only, no quotes.\n\nRequest: " + text
+    )
+    for name, call, enabled in TEXT_PROVIDERS:
+        if not enabled():
+            continue
+        try:
+            answer = (call(prompt) or "").strip().strip('"')
+            if answer:
+                return answer
+        except Exception as error:
+            print(f"{name} translate error:", repr(error))
+    return text
