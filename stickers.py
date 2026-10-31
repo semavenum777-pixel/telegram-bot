@@ -179,17 +179,22 @@ def _draw_block(draw, text, width, top, max_height, fill, stroke_fill, from_bott
         y += line_height
 
 
-def make_meme(image, top="", bottom=""):
-    """Классический мем: белые заглавные буквы с чёрной обводкой сверху и снизу. Без нейросети."""
-    image = image.copy()
-    image.thumbnail((1080, 1080), Image.LANCZOS)
+def draw_meme_text(image, top="", bottom=""):
+    """Рисует мемный текст прямо на картинке (белые заглавные буквы с чёрной обводкой)."""
     draw = ImageDraw.Draw(image)
     margin = image.height // 30
     if top:
         _draw_block(draw, top.upper(), image.width, margin, image.height // 3, "white", "black")
     if bottom:
         _draw_block(draw, bottom.upper(), image.width, image.height - margin, image.height // 3, "white", "black", from_bottom=True)
-    return to_jpeg(image)
+    return image
+
+
+def make_meme(image, top="", bottom=""):
+    """Классический мем: белые заглавные буквы с чёрной обводкой сверху и снизу. Без нейросети."""
+    image = image.copy()
+    image.thumbnail((1080, 1080), Image.LANCZOS)
+    return to_jpeg(draw_meme_text(image, top, bottom))
 
 
 def make_card(image, greeting):
