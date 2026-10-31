@@ -29,19 +29,13 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET") or hashlib.sha256(
 ).hexdigest()
 
 START_TEXT = (
-    "🤖 Привет! Я делаю стикеры.\n\n"
-    "Что можно прислать:\n"
-    "• селфи — сделаю целый «😊 Набор эмоций» (6 стикеров сразу в твой пак) "
-    "или стикер в стиле аниме, Pixar, LEGO, комикс…;\n"
-    "• фото с подписью, что изменить — "
-    "«сделай аниме, фон космос, надпись \"Привет\"»;\n"
-    "• только текст — нарисую стикер с нуля: "
-    "«кот в очках, без фона, надпись \"Йо\"»;\n"
-    "• фото с подписью /mem Текст сверху | Текст снизу — сделаю мем.\n\n"
-    "Ещё умею аватарки в любом стиле, а с ноября — новогодние открытки и стикеры 🎄\n"
-    "Добавь меня в чат с друзьями: ответь на любое фото командой /sticker.\n\n"
-    "Понравился стикер — жми «➕ В мой пак», и я соберу твой личный стикерпак.\n\n"
-    "/mypack — мой стикерпак, /help — подробнее"
+    "👋 Привет! Я превращаю твои фото в стикеры, аватарки, фото и живые видео с помощью нейросетей.\n\n"
+    "📸 <b>Пришли селфи</b> — и выбери кнопкой:\n"
+    "• 😊 набор из 6 стикеров с твоими эмоциями прямо в твой стикерпак;\n"
+    "• 🎌 аниме, 🧸 Pixar, 🧱 LEGO и ещё десяток стилей;\n"
+    "• 📸 фотосессию в Париже или на пляже, 🎬 живое видео, 🎞 GIF.\n\n"
+    "✍️ Или напиши, что нарисовать: «кот в очках, надпись \"Йо\"».\n"
+    "😂 Мем: фото с подписью /mem верх | низ."
 )
 
 HELP_TEXT = (
@@ -66,7 +60,8 @@ HELP_TEXT = (
     "✨ Оживить — под стикером: сделаю живой стикер, а кнопкой 🎞 GIF — гифку.\n"
     "🎞 Пришли гифку — сделаю из неё живой стикер для пака.\n"
     "👥 В группе — добавь меня в чат и ответь на фото командой /sticker (или /sticker аниме).\n"
-    "/mypack — ссылка на твой стикерпак."
+    "/mypack — ссылка на твой стикерпак.\n"
+    "/invite — пригласи друзей и получай больше генераций."
 ) + (f"\n\nВ день можно сделать до {limits.DAILY_LIMIT} стикеров через нейросеть." if limits.enabled() else "")
 
 # Готовые стили для кнопок: ключ → (подпись на кнопке, задание для нейросети).
@@ -217,17 +212,22 @@ SURPRISES = [
 _bot_username = os.environ.get("BOT_USERNAME", "").strip().lstrip("@")
 
 BOT_DESCRIPTION = (
-    "Делаю стикеры из твоих фото с помощью нейросетей: аниме, Pixar, LEGO, комикс и другие стили. "
-    "Набор из 6 эмоций с твоим лицом, аватарки, мемы, новогодние открытки. "
-    "Собираю твой личный стикерпак. Работаю и в групповых чатах. Бесплатно."
+    "🎨 Нейросеть для твоих фото — бесплатно.\n\n"
+    "• Стикеры из селфи: набор из 6 эмоций с твоим лицом сразу в твой стикерпак\n"
+    "• Аниме, Pixar, LEGO, комикс и ещё 10+ стилей\n"
+    "• Фотосессии: Париж, пляж, деловой портрет\n"
+    "• Живые видео и GIF из фото, мемы, аватарки\n"
+    "• Новогодние стикеры и открытки 🎄\n\n"
+    "Нажми «Старт» и пришли селфи 👇"
 )
-BOT_SHORT_DESCRIPTION = "Стикеры из фото: аниме, Pixar, комикс и другие стили. Бесплатно."
+BOT_SHORT_DESCRIPTION = "Стикеры, аватарки, фотосессии и живые видео из твоих фото с помощью нейросетей. Бесплатно 🎨"
 BOT_COMMANDS = [
     {"command": "start", "description": "Начать"},
     {"command": "sticker", "description": "Стикер из фото (в группе — ответом на фото)"},
     {"command": "mem", "description": "Мем: /mem текст сверху | текст снизу"},
     {"command": "photo", "description": "Фото с подписью: /photo я на пляже в Майами"},
     {"command": "mypack", "description": "Мой стикерпак"},
+    {"command": "invite", "description": "Пригласить друга — больше генераций"},
     {"command": "connect", "description": "Подключить свой бесплатный баланс для фото и видео"},
     {"command": "balance", "description": "Мой баланс для фото и видео"},
     {"command": "help", "description": "Как пользоваться"},
@@ -484,10 +484,7 @@ def render(chat_id, user_id, origin, style=None, seed=None, params=None, again_d
             return
 
         if not limits.take(user_id):
-            send_message(
-                chat_id,
-                f"⏳ Лимит на сегодня исчерпан: можно {plural_stickers(limits.DAILY_LIMIT)} в день. Приходи завтра!",
-            )
+            send_limit_reached(chat_id, user_id)
             return
 
         if not params["edit"]:
@@ -611,7 +608,7 @@ def make_emotion_pack(chat_id, user, origin, kind="emo"):
         if time.monotonic() - started > 200:
             break
         if not limits.take(user["id"]):
-            send_message(chat_id, f"⏳ Дневной лимит закончился ({plural_stickers(limits.DAILY_LIMIT)} в день). Остальное — завтра!")
+            send_limit_reached(chat_id, user["id"])
             break
         telegram("sendChatAction", json={"chat_id": chat_id, "action": "choose_sticker"})
         try:
@@ -667,6 +664,61 @@ def make_meme_from(chat_id, source, args, reply_to):
         source["message_id"],
         caption=f"😂 Мемы и стикеры — @{bot_username()}",
     )
+
+
+def invite_link(user_id):
+    return f"https://t.me/{bot_username()}?start=ref_{user_id}"
+
+
+def invite_keyboard(user_id):
+    text = "Смотри, этот бот делает стикеры, аватарки и живые видео из твоих фото — бесплатно 🔥"
+    url = "https://t.me/share/url?" + urllib.parse.urlencode({"url": invite_link(user_id), "text": text})
+    return [[{"text": "📤 Отправить приглашение", "url": url}]]
+
+
+def send_invite(chat_id, user_id):
+    if not limits.enabled():
+        send_message(chat_id, f"📤 Поделись ботом с друзьями: {invite_link(user_id)}", keyboard=invite_keyboard(user_id))
+        return
+    friends = limits.friends_count(user_id)
+    send_message(
+        chat_id,
+        f"🎁 За каждого друга, который откроет бота по твоей ссылке, — "
+        f"+{limits.BONUS_PER_FRIEND} генераций в день навсегда (до +{limits.BONUS_CAP}).\n\n"
+        f"👥 Уже пришло друзей: {friends}\n"
+        f"⚡ Твой лимит: {plural_stickers(limits.user_limit(user_id))} в день\n\n"
+        f"Твоя ссылка: {invite_link(user_id)}",
+        keyboard=invite_keyboard(user_id),
+    )
+
+
+def send_limit_reached(chat_id, user_id):
+    text = f"⏳ На сегодня всё: можно {plural_stickers(limits.user_limit(user_id))} в день. Приходи завтра!"
+    if limits.enabled():
+        text += f"\n\n🎁 Хочешь больше? Пригласи друга — +{limits.BONUS_PER_FRIEND} генераций в день за каждого."
+    send_message(chat_id, text, keyboard=invite_keyboard(user_id))
+
+
+def format_count(n):
+    return f"{n:,}".replace(",", " ")
+
+
+def send_start(chat_id, user_id):
+    text = START_TEXT
+    numbers = limits.stats()
+    if numbers and numbers[0] >= 10:
+        users, gens = numbers
+        text += f"\n\n🔥 Уже {format_count(users)} человек сделали {format_count(gens)} картинок."
+    telegram("sendMessage", json={
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "reply_markup": {"inline_keyboard": [
+            [{"text": "🎲 Удиви меня — нарисуй что-нибудь", "callback_data": "surprise"}],
+            [{"text": "👥 Добавить в группу", "url": f"https://t.me/{bot_username()}?startgroup=start"},
+             {"text": "🎁 Пригласить друга", "callback_data": "invite"}],
+        ]},
+    })
 
 
 def surprise(chat_id, user_id, message):
@@ -856,7 +908,7 @@ def make_photo_edit(chat_id, user_id, origin, scene, again_data):
         send_connect_prompt(chat_id)
         return
     if not limits.take(user_id):
-        send_message(chat_id, f"⏳ Лимит на сегодня исчерпан: можно {plural_stickers(limits.DAILY_LIMIT)} в день.")
+        send_limit_reached(chat_id, user_id)
         return
 
     photo = stickers.open_image(download_file(file_id))
@@ -903,7 +955,7 @@ def make_live_video(chat_id, user_id, origin, motion):
         send_connect_prompt(chat_id)
         return
     if not limits.take(user_id):
-        send_message(chat_id, f"⏳ Лимит на сегодня исчерпан: можно {plural_stickers(limits.DAILY_LIMIT)} в день.")
+        send_limit_reached(chat_id, user_id)
         return
 
     photo = stickers.open_image(download_file(file_id))
@@ -1052,6 +1104,10 @@ def handle_callback(query):
             start_connect(chat_id, user)
         return
 
+    if data == "invite":
+        send_invite(chat_id, user["id"])
+        return
+
     if data == "connect:check":
         check_connect(chat_id, user)
         return
@@ -1185,6 +1241,19 @@ def handle_message(message):
         return  # команда другому боту в группе
 
     replied = message.get("reply_to_message") or {}
+    is_private = message["chat"].get("type", "private") == "private"
+    if is_private:
+        is_new = limits.track_user(message["from"]["id"])
+        if command == "/start" and args.startswith("ref_") and is_new:
+            referrer = args[4:]
+            if referrer.isdigit() and limits.reward_referrer(referrer, message["from"]["id"]):
+                send_message(
+                    int(referrer),
+                    f"🎉 По твоей ссылке пришёл друг! +{limits.BONUS_PER_FRIEND} генераций в день. /invite — подробнее",
+                )
+    if command == "/invite":
+        send_invite(chat_id, message["from"]["id"])
+        return
     if command == "/sticker":
         handle_sticker_command(message, args)
         return
@@ -1238,11 +1307,7 @@ def handle_message(message):
     text = message_text(message)
 
     if text.startswith("/start"):
-        send_message(
-            chat_id,
-            START_TEXT,
-            keyboard=[[{"text": "🎲 Удиви меня — нарисуй что-нибудь", "callback_data": "surprise"}]],
-        )
+        send_start(chat_id, message["from"]["id"])
         return
 
     if text.startswith("/help"):
@@ -1318,11 +1383,13 @@ def is_duplicate(update_id):
 def ensure_bot_profile():
     """Описание бота, которое видно до нажатия «Старт», и меню команд."""
     current = telegram("getMyCommands").get("result") or []
-    if [c.get("command") for c in current] == [c["command"] for c in BOT_COMMANDS]:
-        return
-    telegram("setMyCommands", json={"commands": BOT_COMMANDS})
-    telegram("setMyDescription", json={"description": BOT_DESCRIPTION})
-    telegram("setMyShortDescription", json={"short_description": BOT_SHORT_DESCRIPTION})
+    if [(c.get("command"), c.get("description")) for c in current] != \
+            [(c["command"], c["description"]) for c in BOT_COMMANDS]:
+        telegram("setMyCommands", json={"commands": BOT_COMMANDS})
+    if (telegram("getMyDescription").get("result") or {}).get("description") != BOT_DESCRIPTION:
+        telegram("setMyDescription", json={"description": BOT_DESCRIPTION})
+    if (telegram("getMyShortDescription").get("result") or {}).get("short_description") != BOT_SHORT_DESCRIPTION:
+        telegram("setMyShortDescription", json={"short_description": BOT_SHORT_DESCRIPTION})
 
 
 def register_webhook():
