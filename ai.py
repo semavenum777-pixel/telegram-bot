@@ -37,6 +37,21 @@ POLLINATIONS_MODEL = _env("POLLINATIONS_MODEL", "black-forest-labs/flux.2-klein-
 # Модель картинок от OpenAI (как в ChatGPT), доступная через баланс Pollinations.
 POLLINATIONS_GPT_MODEL = _env("POLLINATIONS_GPT_MODEL", "gptimage")
 
+# Универсальное подключение любых сервисов со стандартом OpenAI Images API
+# (OpenAI, Together AI, шлюзы с бонусом при регистрации и т.п.). До 5 штук:
+# EXTRA1_URL, EXTRA1_KEY, EXTRA1_MODEL (+ необязательный EXTRA1_SIZE), EXTRA2_..., и т.д.
+EXTRA_SERVICES = []
+for _n in range(1, 6):
+    _url, _key, _model = _env(f"EXTRA{_n}_URL"), _env(f"EXTRA{_n}_KEY"), _env(f"EXTRA{_n}_MODEL")
+    if _url and _key and _model:
+        EXTRA_SERVICES.append({
+            "name": f"Extra{_n} ({_model})",
+            "url": _url.rstrip("/"),
+            "key": _key,
+            "model": _model,
+            "size": _env(f"EXTRA{_n}_SIZE"),
+        })
+
 BFL_API_KEY = _env("BFL_API_KEY")
 BFL_MODEL = _env("BFL_MODEL", "flux-kontext-dev")
 BFL_API = "https://api.bfl.ai/v1"
@@ -54,6 +69,8 @@ CF_INPUT_MAX_SIDE = 504
 TOTAL_BUDGET_SECONDS = 240
 # На сколько отложить нейросеть, у которой закончился лимит.
 EXHAUSTED_COOLDOWN_SECONDS = 30 * 60
+# Если закончились деньги/бонус (HTTP 402), сами по себе они не вернутся — проверяем реже.
+NO_CREDITS_COOLDOWN_SECONDS = 6 * 60 * 60
 
 PARSE_PROMPT = """You turn a user's request for a Telegram sticker into JSON.
 The user writes in Russian (or another language). Reply with JSON only:
@@ -77,10 +94,17 @@ class AIUnavailable(Exception):
 class LimitReached(Exception):
     """Нейросеть ответила, что бесплатный лимит исчерпан."""
 
+    def __init__(self, message, no_credits=False):
+        super().__init__(message)
+        self.no_credits = no_credits
+
 
 def _check(response):
     if response.status_code in (402, 429):
-        raise LimitReached(f"HTTP {response.status_code}: {response.text[:200]}")
+        raise LimitReached(
+            f"HTTP {response.status_code}: {response.text[:200]}",
+            no_credits=response.status_code == 402,
+        )
     response.raise_for_status()
 
 
@@ -168,6 +192,35 @@ def _pollinations_image(prompt, photo, timeout, seed, size=IMAGE_SIZE, model=Non
             f"{POLLINATIONS_API}/images/generations",
             headers=headers,
             json={"prompt": prompt, "model": model, "size": size},
+            timeout=timeout,
+        )
+    _check(response)
+    item = response.json()["data"][0]
+    if item.get("b64_json"):
+        return base64.b64decode(item["b64_json"])
+    image = requests.get(item["url"], timeout=60)
+    image.raise_for_status()
+    return image.content
+
+
+def _openai_compatible_image(service, prompt, photo, timeout, seed, size=IMAGE_SIZE):
+    """Любой сервис со стандартом OpenAI Images API: /images/edits и /images/generations."""
+    headers = {"Authorization": f"Bearer {service['key']}"}
+    image_size = service["size"] or f"{max(size, 1024)}x{max(size, 1024)}"
+    if photo:
+        response = requests.post(
+            f"{service['url']}/images/edits",
+            headers=headers,
+            data={"prompt": prompt, "model": service["model"], "size": image_size, "n": "1"},
+            files=[("image", ("photo.png", photo["large"], "image/png"))]
+            + ([("image", ("reference.png", photo["ref_large"], "image/png"))] if photo.get("ref_large") else []),
+            timeout=timeout,
+        )
+    else:
+        response = requests.post(
+            f"{service['url']}/images/generations",
+            headers=headers,
+            json={"prompt": prompt, "model": service["model"], "size": image_size, "n": 1},
             timeout=timeout,
         )
     _check(response)
@@ -273,6 +326,12 @@ PROVIDERS = [
      "call": _gemini_image, "enabled": lambda: bool(GEMINI_API_KEY)},
     {"name": "Black Forest Labs", "group": "BFL", "photo": True, "timeout": 90,
      "call": _bfl_image, "enabled": lambda: bool(BFL_API_KEY)},
+    *[
+        {"name": service["name"], "group": service["name"], "photo": True, "timeout": 120,
+         "call": (lambda service: lambda *a: _openai_compatible_image(service, *a))(service),
+         "enabled": lambda: True}
+        for service in EXTRA_SERVICES
+    ],
     {"name": "Pollinations FLUX", "group": "Pollinations", "photo": True, "timeout": 90,
      "call": _pollinations_image, "enabled": lambda: bool(POLLINATIONS_KEY)},
     {"name": "Pollinations GPT Image", "group": "Pollinations", "photo": True, "timeout": 120,
@@ -290,7 +349,7 @@ _exhausted_until = {}
 
 # Для фото первыми идут нейросети, которые лучше сохраняют сходство с человеком
 # (если их ключи подключены). Для рисования по тексту порядок обычный.
-PHOTO_PRIORITY = {"Gemini": 0, "BFL": 1}
+PHOTO_PRIORITY = {"Gemini": 0, "BFL": 1, **{service["name"]: 2 for service in EXTRA_SERVICES}}
 
 
 def _available(has_photo):
@@ -326,7 +385,8 @@ def generate_image(prompt, photo_png=None, photo_png_small=None, seed=None, ref_
             return provider["call"](prompt, photo, min(provider["timeout"], remaining), seed, size)
         except LimitReached as error:
             print(f"{provider['name']} limit reached:", error)
-            _exhausted_until[provider["group"]] = time.time() + EXHAUSTED_COOLDOWN_SECONDS
+            cooldown = NO_CREDITS_COOLDOWN_SECONDS if error.no_credits else EXHAUSTED_COOLDOWN_SECONDS
+            _exhausted_until[provider["group"]] = time.time() + cooldown
         except Exception as error:
             print(f"{provider['name']} failed:", repr(error))
 
