@@ -11,6 +11,7 @@ import requests
 from flask import Flask, abort, request
 
 import ai
+import animate
 import limits
 import pages
 import stickers
@@ -233,7 +234,7 @@ def download_file(file_id):
     return response.content
 
 
-def send_sticker(chat_id, sticker_file, reply_to=None, keyboard=None):
+def send_sticker(chat_id, sticker_file, reply_to=None, keyboard=None, video=False):
     data = {"chat_id": chat_id}
     if reply_to:
         data["reply_parameters"] = json.dumps(
@@ -244,7 +245,8 @@ def send_sticker(chat_id, sticker_file, reply_to=None, keyboard=None):
     return telegram(
         "sendSticker",
         data=data,
-        files={"sticker": ("sticker.webp", sticker_file, "image/webp")},
+        files={"sticker": ("sticker.webm", sticker_file, "video/webm") if video
+               else ("sticker.webp", sticker_file, "image/webp")},
     )
 
 
@@ -335,7 +337,11 @@ def result_keyboard(again_data=None):
     if again_data:
         first_row.append({"text": "🔄 Ещё вариант", "callback_data": again_data})
     first_row.append({"text": "✍️ Надпись", "callback_data": "caption"})
-    return [first_row, quick_caption_row(), [{"text": "➕ В мой пак", "callback_data": "pack"}]]
+    return [first_row, quick_caption_row(), [ANIMATE_BUTTON, PACK_BUTTON]]
+
+
+ANIMATE_BUTTON = {"text": "✨ Оживить", "callback_data": "anim"}
+PACK_BUTTON = {"text": "➕ В мой пак", "callback_data": "pack"}
 
 
 def quick_caption_row():
@@ -468,11 +474,11 @@ def bot_username():
     return _bot_username
 
 
-def put_in_pack(user, sticker_file_id, emoji="😀"):
+def put_in_pack(user, sticker_file_id, emoji="😀", video=False):
     """Добавляет стикер в личный пак пользователя, при первом разе создаёт пак.
-    Возвращает ответ Telegram."""
+    Возвращает ответ Telegram. В одном паке могут быть и обычные, и анимированные стикеры."""
     name = pack_name(user["id"])
-    sticker = {"sticker": sticker_file_id, "format": "static", "emoji_list": [emoji]}
+    sticker = {"sticker": sticker_file_id, "format": "video" if video else "static", "emoji_list": [emoji]}
 
     result = telegram("addStickerToSet", json={"user_id": user["id"], "name": name, "sticker": sticker})
     if not result.get("ok") and "STICKERSET_INVALID" in (result.get("description") or ""):
@@ -487,8 +493,8 @@ def put_in_pack(user, sticker_file_id, emoji="😀"):
     return result
 
 
-def add_to_pack(chat_id, user, sticker_file_id, reply_to=None):
-    result = put_in_pack(user, sticker_file_id)
+def add_to_pack(chat_id, user, sticker_file_id, reply_to=None, video=False):
+    result = put_in_pack(user, sticker_file_id, video=video)
     name = pack_name(user["id"])
     if result.get("ok"):
         send_message(
@@ -553,7 +559,7 @@ def make_emotion_pack(chat_id, user, origin, kind="emo"):
             chat_id,
             stickers.make_sticker(image, caption, outline=True),
             origin["message_id"],
-            [[{"text": "✍️ Надпись", "callback_data": "caption"}]],
+            [[{"text": "✍️ Надпись", "callback_data": "caption"}, ANIMATE_BUTTON]],
         )
         if sent.get("ok"):
             put_in_pack(user, sent["result"]["sticker"]["file_id"], emoji)
@@ -622,14 +628,40 @@ def is_our_sticker(message):
     return bool(message.get("sticker")) and author.get("is_bot") and author.get("username") == bot_username()
 
 
+def animate_sticker(chat_id, message, effect=None):
+    """✨ Оживить: делает из обычного стикера бота анимированный (видео-стикер)."""
+    source = message
+    if not (source.get("sticker") and not source["sticker"].get("is_video")):
+        source = message.get("reply_to_message") or {}  # нажали под уже анимированным стикером
+    sticker = source.get("sticker")
+    if not sticker or sticker.get("is_video") or sticker.get("is_animated"):
+        send_message(chat_id, "Не нашёл исходный стикер — нажми «✨ Оживить» под обычным стикером.")
+        return
+
+    effect = effect or random.choice(list(animate.EFFECTS))
+    telegram("sendChatAction", json={"chat_id": chat_id, "action": "choose_sticker"})
+    image = stickers.open_image(download_file(sticker["file_id"]))
+    video = animate.make_video_sticker(image, effect)
+    send_sticker(
+        chat_id,
+        video,
+        source["message_id"],
+        [[{"text": "🔄 Другая анимация", "callback_data": "anim"}], [PACK_BUTTON]],
+        video=True,
+    )
+
+
 def caption_sticker(chat_id, sticker_message, caption):
     """Дописывает текст на уже готовый стикер бота."""
+    if sticker_message["sticker"].get("is_video"):
+        send_message(chat_id, "✍️ Надпись можно добавить к обычному стикеру — ответь текстом на него, а потом оживи.")
+        return
     image = stickers.open_image(download_file(sticker_message["sticker"]["file_id"]))
     send_sticker(
         chat_id,
         stickers.make_sticker(image, caption),
         sticker_message["message_id"],
-        [[{"text": "✍️ Надпись", "callback_data": "caption"}], [{"text": "➕ В мой пак", "callback_data": "pack"}]],
+        [[{"text": "✍️ Надпись", "callback_data": "caption"}], [ANIMATE_BUTTON, PACK_BUTTON]],
     )
 
 
@@ -669,7 +701,7 @@ def handle_callback(query):
         sticker = message.get("sticker")
         if not sticker:
             return
-        add_to_pack(chat_id, user, sticker["file_id"], reply_to=message["message_id"])
+        add_to_pack(chat_id, user, sticker["file_id"], reply_to=message["message_id"], video=bool(sticker.get("is_video")))
         # Убираем кнопку «В мой пак», чтобы не добавить стикер дважды.
         keyboard = [
             [button for button in row if button["callback_data"] != "pack"]
@@ -683,6 +715,10 @@ def handle_callback(query):
                 "reply_markup": {"inline_keyboard": [row for row in keyboard if row]},
             },
         )
+        return
+
+    if data == "anim":
+        animate_sticker(chat_id, message)
         return
 
     if data.startswith("cap:"):
