@@ -85,8 +85,15 @@ EMOTIONS = [
     ("wow", "😮", "Ого!", "surprised and shocked with an open mouth"),
 ]
 EMOTION_STYLE = (
-    "turn the main subject into a cute cartoon sticker character that looks {mood}, "
-    "keep it recognizable, expressive face, isolated on a plain pure white background"
+    "Image 1 is a photo of the subject. Draw this exact same subject as a cute cartoon sticker "
+    "character that looks {mood}. Preserve the identity: same face shape, hairstyle, hair color, "
+    "eye color, skin tone, glasses, facial hair and clothes. Change only the facial expression and pose. "
+    "Expressive face, isolated on a plain pure white background."
+)
+# Добавляется, когда первый стикер уже готов: остальные рисуются по нему как по образцу.
+EMOTION_REFERENCE = (
+    " Image 2 is the already drawn sticker of this same character: keep exactly the same character "
+    "design, face, art style and colors as in image 2."
 )
 
 # Быстрые надписи под стикером (без эмодзи — их нет в шрифте).
@@ -354,12 +361,16 @@ def make_emotion_pack(chat_id, user, origin):
         send_message(chat_id, "😔 Нейросеть пока не подключена.")
         return
 
-    photo = stickers.open_image(download_file(file_id))
+    # Квадрат по центру: лицо занимает больше кадра, и нейросеть лучше его сохраняет.
+    photo = stickers.crop_square(stickers.open_image(download_file(file_id)))
     photo_large = stickers.to_png_bytes(photo, max_side=1024)
     photo_small = stickers.to_png_bytes(photo, max_side=ai.CF_INPUT_MAX_SIDE)
     status = send_message(chat_id, "😊 Делаю набор из 6 эмоций — это займёт около минуты…")
     started = time.monotonic()
     done = 0
+    # Одинаковый seed и первый стикер как образец — чтобы все 6 были одним персонажем.
+    seed = random.randint(0, 2**31 - 1)
+    reference = None
 
     for _, emoji, caption, mood in EMOTIONS:
         if time.monotonic() - started > 200:
@@ -369,13 +380,22 @@ def make_emotion_pack(chat_id, user, origin):
             break
         telegram("sendChatAction", json={"chat_id": chat_id, "action": "choose_sticker"})
         try:
+            prompt = EMOTION_STYLE.format(mood=mood) + (EMOTION_REFERENCE if reference else "")
             result = ai.generate_image(
-                EMOTION_STYLE.format(mood=mood), photo_png=photo_large, photo_png_small=photo_small
+                prompt,
+                photo_png=photo_large,
+                photo_png_small=photo_small,
+                seed=seed,
+                ref_png=reference and stickers.to_png_bytes(reference, max_side=1024),
+                ref_png_small=reference and stickers.to_png_bytes(reference, max_side=ai.CF_INPUT_MAX_SIDE),
             )
         except ai.AIUnavailable:
             send_message(chat_id, "😔 Нейросети сейчас заняты — доделаю в другой раз.")
             break
-        image = stickers.remove_plain_background(stickers.open_image(result))
+        generated = stickers.open_image(result)
+        if reference is None:
+            reference = generated
+        image = stickers.remove_plain_background(generated)
         sent = send_sticker(
             chat_id,
             stickers.make_sticker(image, caption, outline=True),
