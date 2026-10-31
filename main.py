@@ -3,6 +3,8 @@ import hashlib
 import json
 import os
 import random
+import time
+import urllib.parse
 
 import requests
 from flask import Flask, abort, request
@@ -26,7 +28,8 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET") or hashlib.sha256(
 START_TEXT = (
     "🤖 Привет! Я делаю стикеры.\n\n"
     "Что можно прислать:\n"
-    "• фото — предложу стили: аниме, Pixar, комикс, пиксель-арт…;\n"
+    "• селфи — сделаю целый «😊 Набор эмоций» (6 стикеров сразу в твой пак) "
+    "или стикер в стиле аниме, Pixar, LEGO, комикс…;\n"
     "• фото с подписью, что изменить — "
     "«сделай аниме, фон космос, надпись \"Привет\"»;\n"
     "• только текст — нарисую стикер с нуля: "
@@ -37,12 +40,14 @@ START_TEXT = (
 
 HELP_TEXT = (
     "Как пользоваться:\n\n"
-    "1. Отправь фото без подписи — выбери стиль кнопкой.\n\n"
+    "1. Отправь фото без подписи — выбери стиль кнопкой. "
+    "«😊 Набор эмоций» сделает сразу 6 стикеров с разными эмоциями и сложит их в твой пак.\n\n"
     "2. Или отправь фото и в подписи напиши, что нужно:\n"
     "   — стиль или персонаж: аниме, мультфильм, супергерой, пиксель-арт…\n"
     "   — фон: «фон море», «без фона»\n"
     "   — надпись: надпись \"Текст\"\n\n"
-    "3. Или напиши только текст — я нарисую стикер с нуля.\n\n"
+    "3. Или напиши только текст — я нарисую стикер с нуля. "
+    "Нет идей — нажми «🎲 Удиви меня» в /start.\n\n"
     "Под каждым стикером есть кнопки:\n"
     "🔄 Ещё вариант — перерисовать по тому же запросу;\n"
     "✍️ Надпись — ответь на стикер текстом, и я допишу его на стикер;\n"
@@ -60,10 +65,48 @@ STYLES = {
     "hero": ("🦸 Супергерой", "turn the main subject (person, pet or object) into a superhero in a colorful costume with a cape, comic style, keep it recognizable"),
     "chibi": ("🍡 Чиби", "turn the main subject (person, pet or object) into a cute chibi character with a big head and small body, kawaii style"),
     "cyber": ("🌆 Киберпанк", "turn the main subject (person, pet or object) into a cyberpunk character, neon glow, futuristic outfit, keep it recognizable"),
+    "lego": ("🧱 LEGO", "turn the main subject (person, pet or object) into a plastic toy brick minifigure, glossy plastic, keep it recognizable"),
+    "plush": ("🐻 Плюшевый", "turn the main subject (person, pet or object) into a soft cute plush toy, fluffy fabric texture, keep it recognizable"),
+    "vangogh": ("🌻 Ван Гог", "portrait of the main subject painted in the style of Vincent van Gogh, thick swirling brush strokes, keep it recognizable"),
+    "zombie": ("🧟 Зомби", "turn the main subject (person, pet or object) into a funny cartoon zombie, green skin, not scary, keep it recognizable"),
     "cartoon": ("✏️ Мультик", "turn the main subject (person, pet or object) into a flat 2D cartoon character, simple shapes, bright colors, keep it recognizable"),
 }
 
 PLAIN = "plain"
+RANDOM = "random"
+
+# Набор эмоций: ключ, эмодзи для пака, надпись, описание для нейросети.
+EMOTIONS = [
+    ("happy", "😊", "Ура!", "very happy with a big joyful smile"),
+    ("sad", "😢", "Грущу", "sad with teary eyes"),
+    ("angry", "😡", "Злюсь", "angry and furious, frowning"),
+    ("love", "😍", "Люблю", "in love, with heart-shaped eyes and little hearts around"),
+    ("laugh", "😂", "Ахаха", "laughing hard with tears of joy"),
+    ("wow", "😮", "Ого!", "surprised and shocked with an open mouth"),
+]
+EMOTION_STYLE = (
+    "turn the main subject into a cute cartoon sticker character that looks {mood}, "
+    "keep it recognizable, expressive face, isolated on a plain pure white background"
+)
+
+# Быстрые надписи под стикером (без эмодзи — их нет в шрифте).
+QUICK_CAPTIONS = ["Ок", "Спасибо", "Ахах", "Люблю"]
+
+# Идеи для кнопки «Удиви меня»: (как показать пользователю, задание для нейросети).
+SURPRISES = [
+    ("кот-астронавт", "a cute cat astronaut floating in space"),
+    ("капибара с мандарином в джакузи", "a relaxed capybara in a hot tub with a tangerine on its head"),
+    ("корги-супергерой", "a corgi superhero with a red cape flying"),
+    ("енот ест пиццу", "a happy raccoon eating a huge slice of pizza"),
+    ("пингвин-диджей", "a penguin DJ with headphones at a turntable"),
+    ("ленивец с кофе", "a sleepy sloth holding a big cup of coffee"),
+    ("хомяк-рокер", "a hamster rock star playing an electric guitar"),
+    ("панда-самурай", "a panda samurai with a katana, heroic pose"),
+    ("утка на пляже", "a cool duck in sunglasses relaxing on a beach"),
+    ("дракончик пьёт чай", "a tiny cute dragon drinking tea from a cup"),
+    ("лиса в пижаме", "a sleepy fox in pajamas yawning"),
+    ("сова-профессор", "a wise owl professor with glasses and a book"),
+]
 
 _bot_username = os.environ.get("BOT_USERNAME", "").strip().lstrip("@")
 
@@ -77,6 +120,16 @@ BOT_COMMANDS = [
     {"command": "mypack", "description": "Мой стикерпак"},
     {"command": "help", "description": "Как пользоваться"},
 ]
+
+
+def plural_stickers(n):
+    if n % 10 == 1 and n % 100 != 11:
+        word = "стикер"
+    elif 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        word = "стикера"
+    else:
+        word = "стикеров"
+    return f"{n} {word}"
 
 
 def telegram(method, **kwargs):
@@ -113,7 +166,7 @@ def send_sticker(chat_id, sticker_file, reply_to=None, keyboard=None):
         )
     if keyboard:
         data["reply_markup"] = json.dumps({"inline_keyboard": keyboard})
-    telegram(
+    return telegram(
         "sendSticker",
         data=data,
         files={"sticker": ("sticker.webp", sticker_file, "image/webp")},
@@ -145,8 +198,12 @@ def style_keyboard():
         {"text": label, "callback_data": f"style:{key}"}
         for key, (label, _) in STYLES.items()
     ]
-    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
-    rows.append([{"text": "🖼 Просто стикер", "callback_data": f"style:{PLAIN}"}])
+    rows = [[{"text": "😊 Набор эмоций — 6 стикеров в пак", "callback_data": "emo"}]]
+    rows += [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append([
+        {"text": "🎲 Случайный стиль", "callback_data": f"style:{RANDOM}"},
+        {"text": "🖼 Просто стикер", "callback_data": f"style:{PLAIN}"},
+    ])
     return rows
 
 
@@ -155,7 +212,19 @@ def result_keyboard(again_data=None):
     if again_data:
         first_row.append({"text": "🔄 Ещё вариант", "callback_data": again_data})
     first_row.append({"text": "✍️ Надпись", "callback_data": "caption"})
-    return [first_row, [{"text": "➕ В мой пак", "callback_data": "pack"}]]
+    return [first_row, quick_caption_row(), [{"text": "➕ В мой пак", "callback_data": "pack"}]]
+
+
+def quick_caption_row():
+    return [{"text": text, "callback_data": f"cap:{i}"} for i, text in enumerate(QUICK_CAPTIONS)]
+
+
+def share_keyboard(name):
+    text = f"Смотри мои стикеры! Сделал в @{bot_username()}"
+    url = "https://t.me/share/url?" + urllib.parse.urlencode(
+        {"url": f"https://t.me/addstickers/{name}", "text": text}
+    )
+    return [[{"text": "📤 Поделиться паком", "url": url}]]
 
 
 def build_prompt(params, has_photo):
@@ -167,7 +236,7 @@ def build_prompt(params, has_photo):
     return prompt
 
 
-def render(chat_id, user_id, origin, style=None, seed=None):
+def render(chat_id, user_id, origin, style=None, seed=None, params=None, again_data=None):
     """Делает стикер по сообщению пользователя origin и отправляет его ответом на это сообщение."""
     text = message_text(origin)
     file_id = get_image_file_id(origin)
@@ -178,7 +247,9 @@ def render(chat_id, user_id, origin, style=None, seed=None):
         send_sticker(chat_id, stickers.make_sticker(photo, outline=True), reply_to, result_keyboard())
         return
 
-    if style:
+    if params:
+        pass
+    elif style:
         params = {"edit": STYLES[style][1], "caption": "", "remove_background": True}
     else:
         params = ai.parse_request(text, has_photo=bool(photo))
@@ -195,7 +266,7 @@ def render(chat_id, user_id, origin, style=None, seed=None):
         if not limits.take(user_id):
             send_message(
                 chat_id,
-                f"⏳ Лимит на сегодня исчерпан: можно {limits.DAILY_LIMIT} стикеров в день. Приходи завтра!",
+                f"⏳ Лимит на сегодня исчерпан: можно {plural_stickers(limits.DAILY_LIMIT)} в день. Приходи завтра!",
             )
             return
 
@@ -222,7 +293,7 @@ def render(chat_id, user_id, origin, style=None, seed=None):
     if params["remove_background"]:
         image = stickers.remove_plain_background(image)
 
-    again = f"again:{style}" if style else "again"
+    again = again_data or (f"again:{style}" if style else "again")
     send_sticker(
         chat_id,
         stickers.make_sticker(image, params["caption"], outline=params["remove_background"]),
@@ -238,26 +309,104 @@ def bot_username():
     return _bot_username
 
 
-def add_to_pack(user, sticker_file_id):
-    """Добавляет стикер в личный пак пользователя, при первом разе создаёт пак."""
+def put_in_pack(user, sticker_file_id, emoji="😀"):
+    """Добавляет стикер в личный пак пользователя, при первом разе создаёт пак.
+    Возвращает ответ Telegram."""
     name = pack_name(user["id"])
-    sticker = {"sticker": sticker_file_id, "format": "static", "emoji_list": ["😀"]}
+    sticker = {"sticker": sticker_file_id, "format": "static", "emoji_list": [emoji]}
 
     result = telegram("addStickerToSet", json={"user_id": user["id"], "name": name, "sticker": sticker})
     if not result.get("ok") and "STICKERSET_INVALID" in (result.get("description") or ""):
-        title = f"Стикеры {user.get('first_name', '')}".strip()[:64]
+        # В названии пака — ссылка на бота: кто получит стикер, сможет найти бота.
+        title = f"{user.get('first_name', 'Мои')} стикеры · @{bot_username()}"[:64]
         result = telegram(
             "createNewStickerSet",
             json={"user_id": user["id"], "name": name, "title": title, "stickers": [sticker]},
         )
+    if not result.get("ok"):
+        print("Pack error:", result)
+    return result
 
+
+def add_to_pack(chat_id, user, sticker_file_id, reply_to=None):
+    result = put_in_pack(user, sticker_file_id)
+    name = pack_name(user["id"])
     if result.get("ok"):
-        return f"✅ Добавил в твой пак: https://t.me/addstickers/{name}"
+        send_message(
+            chat_id,
+            f"✅ Добавил в твой пак: https://t.me/addstickers/{name}",
+            reply_to=reply_to,
+            keyboard=share_keyboard(name),
+        )
+    elif "TOO_MUCH" in (result.get("description") or ""):
+        send_message(chat_id, "😔 В паке уже максимум стикеров (120).", reply_to=reply_to)
+    else:
+        send_message(chat_id, "😔 Не получилось добавить стикер в пак. Попробуй ещё раз.", reply_to=reply_to)
 
-    print("Pack error:", result)
-    if "TOO_MUCH" in (result.get("description") or ""):
-        return "😔 В паке уже максимум стикеров (120)."
-    return "😔 Не получилось добавить стикер в пак. Попробуй ещё раз."
+
+def make_emotion_pack(chat_id, user, origin):
+    """Делает из одного фото 6 стикеров с разными эмоциями и складывает их в пак."""
+    file_id = get_image_file_id(origin)
+    if not file_id:
+        send_message(chat_id, "Для набора эмоций нужно фото.")
+        return
+    if not ai.ai_configured(has_photo=True):
+        send_message(chat_id, "😔 Нейросеть пока не подключена.")
+        return
+
+    photo = stickers.open_image(download_file(file_id))
+    photo_large = stickers.to_png_bytes(photo, max_side=1024)
+    photo_small = stickers.to_png_bytes(photo, max_side=ai.CF_INPUT_MAX_SIDE)
+    status = send_message(chat_id, "😊 Делаю набор из 6 эмоций — это займёт около минуты…")
+    started = time.monotonic()
+    done = 0
+
+    for _, emoji, caption, mood in EMOTIONS:
+        if time.monotonic() - started > 200:
+            break
+        if not limits.take(user["id"]):
+            send_message(chat_id, f"⏳ Дневной лимит закончился ({plural_stickers(limits.DAILY_LIMIT)} в день). Остальное — завтра!")
+            break
+        telegram("sendChatAction", json={"chat_id": chat_id, "action": "choose_sticker"})
+        try:
+            result = ai.generate_image(
+                EMOTION_STYLE.format(mood=mood), photo_png=photo_large, photo_png_small=photo_small
+            )
+        except ai.AIUnavailable:
+            send_message(chat_id, "😔 Нейросети сейчас заняты — доделаю в другой раз.")
+            break
+        image = stickers.remove_plain_background(stickers.open_image(result))
+        sent = send_sticker(
+            chat_id,
+            stickers.make_sticker(image, caption, outline=True),
+            origin["message_id"],
+            [[{"text": "✍️ Надпись", "callback_data": "caption"}]],
+        )
+        if sent.get("ok"):
+            put_in_pack(user, sent["result"]["sticker"]["file_id"], emoji)
+            done += 1
+
+    if status.get("ok"):
+        delete_message(chat_id, status["result"]["message_id"])
+    if done:
+        name = pack_name(user["id"])
+        send_message(
+            chat_id,
+            f"🎉 Готово! {plural_stickers(done)} уже в твоём паке: https://t.me/addstickers/{name}",
+            keyboard=share_keyboard(name),
+        )
+
+
+def surprise(chat_id, user_id, message):
+    idea, prompt = random.choice(SURPRISES)
+    send_message(chat_id, f"🎲 Рисую: {idea}")
+    render(
+        chat_id,
+        user_id,
+        {"message_id": message["message_id"]},  # рисуем с нуля, без исходной картинки
+        params={"edit": prompt, "caption": "", "remove_background": True},
+        again_data="surprise",
+    )
 
 
 def pack_name(user_id):
@@ -268,8 +417,12 @@ def send_my_pack(chat_id, user_id):
     name = pack_name(user_id)
     result = telegram("getStickerSet", json={"name": name})
     if result.get("ok"):
-        count = len(result["result"].get("stickers", []))
-        send_message(chat_id, f"📦 Твой стикерпак ({count} шт.): https://t.me/addstickers/{name}")
+        count = len(result.get("result", {}).get("stickers", []))
+        send_message(
+            chat_id,
+            f"📦 В твоём паке {plural_stickers(count)}: https://t.me/addstickers/{name}",
+            keyboard=share_keyboard(name),
+        )
     else:
         send_message(chat_id, "📦 Пак пока пуст. Нажми «➕ В мой пак» под любым стикером — и я его создам.")
 
@@ -315,7 +468,7 @@ def handle_callback(query):
         sticker = message.get("sticker")
         if not sticker:
             return
-        send_message(chat_id, add_to_pack(user, sticker["file_id"]), reply_to=message["message_id"])
+        add_to_pack(chat_id, user, sticker["file_id"], reply_to=message["message_id"])
         # Убираем кнопку «В мой пак», чтобы не добавить стикер дважды.
         keyboard = [
             [button for button in row if button["callback_data"] != "pack"]
@@ -331,12 +484,28 @@ def handle_callback(query):
         )
         return
 
+    if data.startswith("cap:"):
+        index = data.partition(":")[2]
+        if message.get("sticker") and index.isdigit() and int(index) < len(QUICK_CAPTIONS):
+            caption_sticker(chat_id, message, QUICK_CAPTIONS[int(index)])
+        return
+
+    if data == "surprise":
+        surprise(chat_id, user["id"], message)
+        return
+
     origin = message.get("reply_to_message")
     if not origin:
         send_message(chat_id, "Не нашёл исходное сообщение — пришли фото или запрос заново.")
         return
 
+    if data == "emo":
+        make_emotion_pack(chat_id, user, origin)
+        return
+
     action, _, style = data.partition(":")
+    if style == RANDOM:
+        style = random.choice(list(STYLES))
     if style and style != PLAIN and style not in STYLES:
         return
 
@@ -351,7 +520,11 @@ def handle_message(message):
     text = message_text(message)
 
     if text.startswith("/start"):
-        send_message(chat_id, START_TEXT)
+        send_message(
+            chat_id,
+            START_TEXT,
+            keyboard=[[{"text": "🎲 Удиви меня — нарисуй что-нибудь", "callback_data": "surprise"}]],
+        )
         return
 
     if text.startswith("/help"):
