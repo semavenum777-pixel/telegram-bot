@@ -228,6 +228,8 @@ BOT_COMMANDS = [
     {"command": "mem", "description": "Мем: /mem текст сверху | текст снизу"},
     {"command": "photo", "description": "Фото с подписью: /photo я на пляже в Майами"},
     {"command": "mypack", "description": "Мой стикерпак"},
+    {"command": "connect", "description": "Подключить свой бесплатный баланс для фото и видео"},
+    {"command": "balance", "description": "Мой баланс для фото и видео"},
     {"command": "help", "description": "Как пользоваться"},
 ]
 
@@ -390,7 +392,7 @@ def style_keyboard():
         {"text": "🎲 Случайный стиль", "callback_data": f"style:{RANDOM}"},
         {"text": "🖼 Просто стикер", "callback_data": f"style:{PLAIN}"},
     ])
-    if ai.video_configured():
+    if premium_available():
         rows.insert(0, [{"text": "🎬 Оживить фото — живое видео", "callback_data": "video"}])
         rows.insert(0, [{"text": "📸 Фотосессия — реалистичное фото", "callback_data": "photo"}])
     rows.append([
@@ -752,11 +754,106 @@ def photo_keyboard():
     return rows
 
 
+# ---------- личный баланс Pollinations у каждого пользователя ----------
+
+USER_KEY_TTL = 30 * 24 * 3600
+
+
+def premium_available():
+    """Фотосессия и живое видео: либо каждый подключает свой аккаунт (нужна база), либо общий ключ владельца."""
+    return limits.store_enabled() or bool(ai.POLLINATIONS_KEY)
+
+
+def premium_key(user_id):
+    """Ключ, с которым делать фото/видео для этого пользователя (None — нужно подключиться)."""
+    if limits.store_enabled():
+        return limits.load(f"pkey:{user_id}")
+    return ai.POLLINATIONS_KEY or None
+
+
+CONNECT_TEXT = (
+    "🔗 Фотосессии и живое видео делают мощные нейросети (Nano Banana, GPT Image, видео-модели). "
+    "Они работают на твоём личном бесплатном балансе Pollinations — так каждый пользуется, "
+    "пока не закончится его собственный бесплатный лимит.\n\n"
+    "Подключение — 1 минута: нужен вход через GitHub."
+)
+
+
+def send_connect_prompt(chat_id):
+    send_message(
+        chat_id,
+        CONNECT_TEXT,
+        keyboard=[[{"text": "🔗 Подключить бесплатный баланс", "callback_data": "connect"}]],
+    )
+
+
+def start_connect(chat_id, user):
+    if not limits.store_enabled():
+        send_message(chat_id, "Подключение личного баланса пока не настроено владельцем бота.")
+        return
+    data = ai.start_connect()
+    limits.save(f"device:{user['id']}", data["device_code"], data.get("expires_in", 1800))
+    send_message(
+        chat_id,
+        "1️⃣ Открой ссылку и войди через GitHub.\n"
+        "2️⃣ Нажми «Allow» (Разрешить). Там же можно задать, сколько Pollen боту можно тратить.\n"
+        "3️⃣ Вернись сюда и нажми «✅ Я подтвердил».\n\n"
+        f"Код, если спросят: {data['user_code']}",
+        keyboard=[
+            [{"text": "🔗 Открыть Pollinations", "url": data["verification_uri_complete"]}],
+            [{"text": "✅ Я подтвердил", "callback_data": "connect:check"}],
+        ],
+    )
+
+
+def check_connect(chat_id, user):
+    device_code = limits.load(f"device:{user['id']}")
+    if not device_code:
+        send_message(chat_id, "Ссылка устарела — начнём заново.", keyboard=[[{"text": "🔗 Подключить", "callback_data": "connect"}]])
+        return
+    key, error = ai.finish_connect(device_code)
+    if key:
+        limits.save(f"pkey:{user['id']}", key, USER_KEY_TTL)
+        limits.remove(f"device:{user['id']}")
+        balance = ai.pollen_balance(key)
+        extra = f" На балансе: {balance:.2f} Pollen." if isinstance(balance, (int, float)) else ""
+        send_message(chat_id, f"✅ Подключено!{extra} Теперь пришли фото и выбери «📸 Фотосессия» или «🎬 Оживить фото».")
+    elif error in ("authorization_pending", "slow_down"):
+        send_message(chat_id, "⏳ Ещё не подтверждено. Открой ссылку, нажми «Allow», потом снова «✅ Я подтвердил».",
+                     keyboard=[[{"text": "✅ Я подтвердил", "callback_data": "connect:check"}]])
+    else:
+        print("Connect error:", error)
+        send_message(chat_id, "😔 Не получилось подключить. Попробуем ещё раз?",
+                     keyboard=[[{"text": "🔗 Подключить заново", "callback_data": "connect"}]])
+
+
+def send_balance(chat_id, user_id):
+    key = limits.load(f"pkey:{user_id}") if limits.store_enabled() else None
+    if not key:
+        send_connect_prompt(chat_id)
+        return
+    balance = ai.pollen_balance(key)
+    text = f"💰 На твоём балансе Pollinations: {balance:.2f} Pollen." if isinstance(balance, (int, float)) \
+        else "💰 Баланс узнать не удалось, но аккаунт подключён."
+    send_message(chat_id, text + "\nПополнить или поменять лимит можно на enter.pollinations.ai. /disconnect — отключить.")
+
+
+def out_of_credits_text():
+    return (
+        "\n\n⚠️ Твой бесплатный баланс Pollinations для сильных моделей закончился — "
+        "это фото сделала простая бесплатная нейросеть, поэтому лицо может отличаться. /balance — проверить баланс."
+    )
+
+
 def make_photo_edit(chat_id, user_id, origin, scene, again_data):
     """📸 Реалистичное фото с тем же лицом (Nano Banana через Pollinations, с запасными нейросетями)."""
     file_id = get_image_file_id(origin)
     if not file_id:
         send_message(chat_id, "Не нашёл фото — пришли его ещё раз.")
+        return
+    key = premium_key(user_id)
+    if not key:
+        send_connect_prompt(chat_id)
         return
     if not limits.take(user_id):
         send_message(chat_id, f"⏳ Лимит на сегодня исчерпан: можно {plural_stickers(limits.DAILY_LIMIT)} в день.")
@@ -767,12 +864,13 @@ def make_photo_edit(chat_id, user_id, origin, scene, again_data):
     status = send_message(chat_id, "📸 Делаю фото — до минуты…")
     telegram("sendChatAction", json={"chat_id": chat_id, "action": "upload_photo"})
     try:
-        result = ai.edit_photo(
-            PHOTO_STYLE.format(scene=scene),
-            stickers.to_png_bytes(source, max_side=1024),
-            stickers.to_png_bytes(source, max_side=ai.CF_INPUT_MAX_SIDE),
-            seed=random.randint(0, 2**31 - 1),
-        )
+        with ai.use_key(key):
+            result = ai.edit_photo(
+                PHOTO_STYLE.format(scene=scene),
+                stickers.to_png_bytes(source, max_side=1024),
+                stickers.to_png_bytes(source, max_side=ai.CF_INPUT_MAX_SIDE),
+                seed=random.randint(0, 2**31 - 1),
+            )
     except ai.AIUnavailable:
         send_message(chat_id, "😔 Нейросети сейчас заняты или закончился баланс. Попробуй позже.")
         return
@@ -781,7 +879,7 @@ def make_photo_edit(chat_id, user_id, origin, scene, again_data):
             delete_message(chat_id, status["result"]["message_id"])
 
     row = [] if again_data == NO_AGAIN else [{"text": "🔄 Ещё вариант", "callback_data": again_data}]
-    if ai.video_configured():
+    if premium_available():
         row.append({"text": "🎬 Оживить", "callback_data": "video:self"})
     keyboard = [row] if row else None
     send_photo(
@@ -789,7 +887,8 @@ def make_photo_edit(chat_id, user_id, origin, scene, again_data):
         stickers.to_jpeg(stickers.open_image(result)),
         origin["message_id"],
         keyboard,
-        caption=f"📸 Сделано в @{bot_username()} · нейросеть: {ai.last_used['name'] or '—'}",
+        caption=f"📸 Сделано в @{bot_username()} · нейросеть: {ai.last_used['name'] or '—'}"
+        + (out_of_credits_text() if ai.last_used.get("no_credits") and limits.store_enabled() else ""),
     )
 
 
@@ -799,6 +898,10 @@ def make_live_video(chat_id, user_id, origin, motion):
     if not file_id:
         send_message(chat_id, "Не нашёл фото — пришли его ещё раз.")
         return
+    key = premium_key(user_id)
+    if not key:
+        send_connect_prompt(chat_id)
+        return
     if not limits.take(user_id):
         send_message(chat_id, f"⏳ Лимит на сегодня исчерпан: можно {plural_stickers(limits.DAILY_LIMIT)} в день.")
         return
@@ -807,16 +910,17 @@ def make_live_video(chat_id, user_id, origin, motion):
     status = send_message(chat_id, "🎬 Оживляю фото — это займёт 1–3 минуты…")
     telegram("sendChatAction", json={"chat_id": chat_id, "action": "upload_video"})
     try:
-        video = ai.animate_photo(
-            stickers.to_jpeg(photo).getvalue(),
-            VIDEO_STYLE.format(motion=VIDEO_MOTIONS[motion][1]),
-            portrait=photo.height >= photo.width,
-        )
+        with ai.use_key(key):
+            video = ai.animate_photo(
+                stickers.to_jpeg(photo).getvalue(),
+                VIDEO_STYLE.format(motion=VIDEO_MOTIONS[motion][1]),
+                portrait=photo.height >= photo.width,
+            )
     except ai.AIUnavailable:
         send_message(
             chat_id,
-            "😔 Видео-нейросеть сейчас недоступна или закончился её баланс. "
-            "Пока можно сделать 🎞 GIF — он работает всегда.",
+            "😔 Видео не получилось: нейросеть недоступна или на твоём балансе Pollinations "
+            "не хватает Pollen (/balance — проверить). Пока можно сделать 🎞 GIF — он работает всегда.",
         )
         return
     finally:
@@ -939,6 +1043,17 @@ def handle_callback(query):
                 "reply_markup": {"inline_keyboard": [row for row in keyboard if row]},
             },
         )
+        return
+
+    if data == "connect":
+        if message.get("chat", {}).get("type", "private") != "private":
+            send_message(chat_id, f"🔗 Подключение — в личке с ботом: https://t.me/{bot_username()}?start=connect")
+        else:
+            start_connect(chat_id, user)
+        return
+
+    if data == "connect:check":
+        check_connect(chat_id, user)
         return
 
     if data == "anim":
@@ -1073,6 +1188,18 @@ def handle_message(message):
     if command == "/sticker":
         handle_sticker_command(message, args)
         return
+    if command in ("/connect", "/balance", "/disconnect") or raw_text.startswith("/start connect"):
+        if message["chat"].get("type", "private") != "private":
+            send_message(chat_id, f"🔗 Это в личке с ботом: https://t.me/{bot_username()}?start=connect")
+        elif command == "/balance":
+            send_balance(chat_id, message["from"]["id"])
+        elif command == "/disconnect":
+            limits.remove(f"pkey:{message['from']['id']}")
+            send_message(chat_id, "🔌 Отключено. Ключ также можно удалить на enter.pollinations.ai.")
+        else:
+            start_connect(chat_id, message["from"])
+        return
+
     if command == "/photo":
         source = message if get_image_file_id(message) else replied
         if not get_image_file_id(source) or not args:
