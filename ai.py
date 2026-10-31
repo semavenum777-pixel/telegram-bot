@@ -468,3 +468,60 @@ def parse_request(text, has_photo):
         except Exception as error:
             print(f"{name} parse error:", repr(error))
     return _simple_parse(text)
+
+
+# ---------- живое видео из фото ----------
+
+# Видео-нейросеть Pollinations: оживляет фото (моргание, улыбка, движение). Тратит баланс Pollinations.
+POLLINATIONS_VIDEO_MODEL = _env("POLLINATIONS_VIDEO_MODEL", "alibaba/wan-2.2-fast")
+VIDEO_SECONDS = int(_env("VIDEO_SECONDS", "4"))
+POLLINATIONS_MEDIA = "https://media.pollinations.ai"
+
+
+def video_configured():
+    return bool(POLLINATIONS_KEY)
+
+
+def _upload_to_pollinations(image_bytes):
+    """Видео-нейросети нужна ссылка на фото: загружаем его в хранилище Pollinations.
+    Ссылка не публикуется в галереях, но доступна тому, кто её знает; файл удаляется через 30 дней."""
+    response = requests.post(
+        f"{POLLINATIONS_MEDIA}/upload",
+        headers={"Authorization": f"Bearer {POLLINATIONS_KEY}"},
+        files={"file": ("photo.jpg", image_bytes, "image/jpeg")},
+        timeout=60,
+    )
+    _check(response)
+    return response.json()["url"]
+
+
+def animate_photo(image_bytes, prompt, portrait=True):
+    """Возвращает MP4: фото, превращённое в короткое живое видео."""
+    if not video_configured():
+        raise AIUnavailable("No video provider configured")
+    try:
+        url = _upload_to_pollinations(image_bytes)
+        response = requests.get(
+            f"https://gen.pollinations.ai/video/{requests.utils.quote(prompt, safe='')}",
+            headers={"Authorization": f"Bearer {POLLINATIONS_KEY}"},
+            params={
+                "model": POLLINATIONS_VIDEO_MODEL,
+                "image": url,
+                "duration": VIDEO_SECONDS,
+                "aspectRatio": "9:16" if portrait else "16:9",
+                "audio": "false",
+            },
+            timeout=TOTAL_BUDGET_SECONDS,
+        )
+        _check(response)
+        if not response.headers.get("content-type", "").startswith("video/"):
+            raise ValueError(f"Unexpected response: {response.headers.get('content-type')}")
+        return response.content
+    except LimitReached as error:
+        print("Video limit reached:", error)
+        raise AIUnavailable("No video credits") from error
+    except AIUnavailable:
+        raise
+    except Exception as error:
+        print("Video failed:", repr(error))
+        raise AIUnavailable("Video generation failed") from error
