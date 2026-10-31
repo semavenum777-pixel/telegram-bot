@@ -22,6 +22,9 @@ def _env(name, default=""):
 CF_ACCOUNT_ID = _env("CF_ACCOUNT_ID")
 CF_API_TOKEN = _env("CF_API_TOKEN")
 CF_IMAGE_MODEL = _env("CF_IMAGE_MODEL", "@cf/black-forest-labs/flux-2-klein-4b")
+# Запасные модели Cloudflare: пробуются, если основная сломалась (лимит у них общий).
+CF_BACKUP_PHOTO_MODEL = _env("CF_BACKUP_PHOTO_MODEL", "@cf/black-forest-labs/flux-2-klein-9b")
+CF_TEXT_ONLY_MODEL = _env("CF_TEXT_ONLY_MODEL", "@cf/black-forest-labs/flux-1-schnell")
 CF_TEXT_MODEL = _env("CF_TEXT_MODEL", "@cf/meta/llama-3.3-70b-instruct-fp8-fast")
 
 GEMINI_API_KEY = _env("GEMINI_API_KEY")
@@ -31,6 +34,12 @@ GEMINI_API = "https://generativelanguage.googleapis.com/v1beta/models"
 
 POLLINATIONS_KEY = _env("POLLINATIONS_KEY")
 POLLINATIONS_MODEL = _env("POLLINATIONS_MODEL", "black-forest-labs/flux.2-klein-4b")
+# Модель картинок от OpenAI (как в ChatGPT), доступная через баланс Pollinations.
+POLLINATIONS_GPT_MODEL = _env("POLLINATIONS_GPT_MODEL", "gptimage")
+
+BFL_API_KEY = _env("BFL_API_KEY")
+BFL_MODEL = _env("BFL_MODEL", "flux-kontext-dev")
+BFL_API = "https://api.bfl.ai/v1"
 POLLINATIONS_API = "https://gen.pollinations.ai/v1"
 
 FUSIONBRAIN_KEY = _env("FUSIONBRAIN_KEY")
@@ -77,7 +86,7 @@ def _check(response):
 
 # ---------- нейросети для картинок ----------
 
-def _cloudflare_image(prompt, photo, timeout, seed):
+def _cloudflare_image(prompt, photo, timeout, seed, model=None):
     files = {
         "prompt": (None, prompt),
         "width": (None, str(IMAGE_SIZE)),
@@ -89,9 +98,24 @@ def _cloudflare_image(prompt, photo, timeout, seed):
         files["input_image_0"] = ("photo.png", photo["small"], "image/png")
 
     response = requests.post(
-        f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/run/{CF_IMAGE_MODEL}",
+        f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/run/{model or CF_IMAGE_MODEL}",
         headers={"Authorization": f"Bearer {CF_API_TOKEN}"},
         files=files,
+        timeout=timeout,
+    )
+    _check(response)
+    return base64.b64decode(response.json()["result"]["image"])
+
+
+def _cloudflare_schnell(prompt, photo, timeout, seed):
+    """Старая быстрая модель Cloudflare: только рисование по тексту, принимает JSON."""
+    payload = {"prompt": prompt, "steps": 8}
+    if seed is not None:
+        payload["seed"] = seed
+    response = requests.post(
+        f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/run/{CF_TEXT_ONLY_MODEL}",
+        headers={"Authorization": f"Bearer {CF_API_TOKEN}"},
+        json=payload,
         timeout=timeout,
     )
     _check(response)
@@ -122,14 +146,15 @@ def _gemini_image(prompt, photo, timeout, seed):
     raise ValueError("Gemini returned no image")
 
 
-def _pollinations_image(prompt, photo, timeout, seed):
+def _pollinations_image(prompt, photo, timeout, seed, model=None):
+    model = model or POLLINATIONS_MODEL
     headers = {"Authorization": f"Bearer {POLLINATIONS_KEY}"}
     size = f"{IMAGE_SIZE}x{IMAGE_SIZE}"
     if photo:
         response = requests.post(
             f"{POLLINATIONS_API}/images/edits",
             headers=headers,
-            data={"prompt": prompt, "model": POLLINATIONS_MODEL, "size": size},
+            data={"prompt": prompt, "model": model, "size": size},
             files={"image": ("photo.png", photo["large"], "image/png")},
             timeout=timeout,
         )
@@ -137,7 +162,7 @@ def _pollinations_image(prompt, photo, timeout, seed):
         response = requests.post(
             f"{POLLINATIONS_API}/images/generations",
             headers=headers,
-            json={"prompt": prompt, "model": POLLINATIONS_MODEL, "size": size},
+            json={"prompt": prompt, "model": model, "size": size},
             timeout=timeout,
         )
     _check(response)
@@ -147,6 +172,35 @@ def _pollinations_image(prompt, photo, timeout, seed):
     image = requests.get(item["url"], timeout=60)
     image.raise_for_status()
     return image.content
+
+
+def _bfl_image(prompt, photo, timeout, seed):
+    """Black Forest Labs — создатели FLUX. Kontext умеет менять фото."""
+    deadline = time.monotonic() + timeout
+    headers = {"x-key": BFL_API_KEY, "accept": "application/json"}
+    payload = {"prompt": prompt, "aspect_ratio": "1:1", "output_format": "png"}
+    if photo:
+        payload["input_image"] = base64.b64encode(photo["large"]).decode()
+    if seed is not None:
+        payload["seed"] = seed
+
+    response = requests.post(f"{BFL_API}/{BFL_MODEL}", headers=headers, json=payload, timeout=30)
+    _check(response)
+    task = response.json()
+    polling_url = task.get("polling_url") or f"{BFL_API}/get_result?id={task['id']}"
+
+    while time.monotonic() < deadline:
+        time.sleep(2)
+        status = requests.get(polling_url, headers=headers, timeout=20)
+        _check(status)
+        result = status.json()
+        if result.get("status") == "Ready":
+            image = requests.get(result["result"]["sample"], timeout=60)
+            image.raise_for_status()
+            return image.content
+        if result.get("status") not in ("Pending", "Processing", "Queued", None):
+            raise ValueError(f"BFL: {result.get('status')}")
+    raise TimeoutError("BFL did not finish in time")
 
 
 _fusionbrain_pipeline = None
@@ -201,19 +255,31 @@ def _fusionbrain_image(prompt, photo, timeout, seed):
     raise TimeoutError("Kandinsky did not finish in time")
 
 
-# Порядок = приоритет. photo: умеет ли нейросеть менять присланное фото.
+# Порядок = приоритет.
+# photo: умеет ли нейросеть менять присланное фото.
+# group: у моделей одной группы общий лимит — если он кончился, пропускаем всю группу.
 PROVIDERS = [
-    {"name": "Cloudflare", "call": _cloudflare_image, "photo": True, "timeout": 60,
-     "enabled": lambda: bool(CF_ACCOUNT_ID and CF_API_TOKEN)},
-    {"name": "Gemini", "call": _gemini_image, "photo": True, "timeout": 90,
-     "enabled": lambda: bool(GEMINI_API_KEY)},
-    {"name": "Pollinations", "call": _pollinations_image, "photo": True, "timeout": 90,
-     "enabled": lambda: bool(POLLINATIONS_KEY)},
-    {"name": "Kandinsky", "call": _fusionbrain_image, "photo": False, "timeout": 90,
-     "enabled": lambda: bool(FUSIONBRAIN_KEY and FUSIONBRAIN_SECRET)},
+    {"name": "Cloudflare FLUX.2 klein 4B", "group": "Cloudflare", "photo": True, "timeout": 60,
+     "call": _cloudflare_image, "enabled": lambda: bool(CF_ACCOUNT_ID and CF_API_TOKEN)},
+    {"name": "Cloudflare FLUX.2 klein 9B", "group": "Cloudflare", "photo": True, "timeout": 60,
+     "call": lambda *a: _cloudflare_image(*a, model=CF_BACKUP_PHOTO_MODEL),
+     "enabled": lambda: bool(CF_ACCOUNT_ID and CF_API_TOKEN and CF_BACKUP_PHOTO_MODEL)},
+    {"name": "Gemini", "group": "Gemini", "photo": True, "timeout": 90,
+     "call": _gemini_image, "enabled": lambda: bool(GEMINI_API_KEY)},
+    {"name": "Black Forest Labs", "group": "BFL", "photo": True, "timeout": 90,
+     "call": _bfl_image, "enabled": lambda: bool(BFL_API_KEY)},
+    {"name": "Pollinations FLUX", "group": "Pollinations", "photo": True, "timeout": 90,
+     "call": _pollinations_image, "enabled": lambda: bool(POLLINATIONS_KEY)},
+    {"name": "Pollinations GPT Image", "group": "Pollinations", "photo": True, "timeout": 120,
+     "call": lambda *a: _pollinations_image(*a, model=POLLINATIONS_GPT_MODEL),
+     "enabled": lambda: bool(POLLINATIONS_KEY and POLLINATIONS_GPT_MODEL)},
+    {"name": "Cloudflare FLUX.1 schnell", "group": "Cloudflare", "photo": False, "timeout": 60,
+     "call": _cloudflare_schnell, "enabled": lambda: bool(CF_ACCOUNT_ID and CF_API_TOKEN and CF_TEXT_ONLY_MODEL)},
+    {"name": "Kandinsky", "group": "Kandinsky", "photo": False, "timeout": 90,
+     "call": _fusionbrain_image, "enabled": lambda: bool(FUSIONBRAIN_KEY and FUSIONBRAIN_SECRET)},
 ]
 
-# Имя нейросети → время, до которого её не трогаем (закончился лимит).
+# Группа нейросетей → время, до которого её не трогаем (закончился лимит).
 _exhausted_until = {}
 
 
@@ -221,7 +287,7 @@ def _available(has_photo):
     now = time.time()
     return [
         p for p in PROVIDERS
-        if p["enabled"]() and (p["photo"] or not has_photo) and _exhausted_until.get(p["name"], 0) <= now
+        if p["enabled"]() and (p["photo"] or not has_photo) and _exhausted_until.get(p["group"], 0) <= now
     ]
 
 
@@ -235,6 +301,8 @@ def generate_image(prompt, photo_png=None, photo_png_small=None, seed=None):
     deadline = time.monotonic() + TOTAL_BUDGET_SECONDS
 
     for provider in _available(has_photo=bool(photo)):
+        if _exhausted_until.get(provider["group"], 0) > time.time():
+            continue  # лимит группы кончился только что, на другой её модели
         remaining = deadline - time.monotonic()
         if remaining < 15:
             break
@@ -242,7 +310,7 @@ def generate_image(prompt, photo_png=None, photo_png_small=None, seed=None):
             return provider["call"](prompt, photo, min(provider["timeout"], remaining), seed)
         except LimitReached as error:
             print(f"{provider['name']} limit reached:", error)
-            _exhausted_until[provider["name"]] = time.time() + EXHAUSTED_COOLDOWN_SECONDS
+            _exhausted_until[provider["group"]] = time.time() + EXHAUSTED_COOLDOWN_SECONDS
         except Exception as error:
             print(f"{provider['name']} failed:", repr(error))
 

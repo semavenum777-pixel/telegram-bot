@@ -1,3 +1,4 @@
+import collections
 import hashlib
 import json
 import os
@@ -31,7 +32,7 @@ START_TEXT = (
     "• только текст — нарисую стикер с нуля: "
     "«кот в очках, без фона, надпись \"Йо\"».\n\n"
     "Понравился стикер — жми «➕ В мой пак», и я соберу твой личный стикерпак.\n\n"
-    "/help — подробнее"
+    "/mypack — мой стикерпак, /help — подробнее"
 )
 
 HELP_TEXT = (
@@ -44,24 +45,38 @@ HELP_TEXT = (
     "3. Или напиши только текст — я нарисую стикер с нуля.\n\n"
     "Под каждым стикером есть кнопки:\n"
     "🔄 Ещё вариант — перерисовать по тому же запросу;\n"
-    "➕ В мой пак — добавить в твой личный стикерпак."
+    "✍️ Надпись — ответь на стикер текстом, и я допишу его на стикер;\n"
+    "➕ В мой пак — добавить в твой личный стикерпак.\n\n"
+    "Можно прислать и готовый стикер — переделаю его в другом стиле.\n"
+    "/mypack — ссылка на твой стикерпак."
 ) + (f"\n\nВ день можно сделать до {limits.DAILY_LIMIT} стикеров через нейросеть." if limits.enabled() else "")
 
 # Готовые стили для кнопок: ключ → (подпись на кнопке, задание для нейросети).
 STYLES = {
-    "anime": ("🎌 Аниме", "turn the person into an anime character, Japanese anime style, cel shading, keep the face recognizable"),
-    "pixar": ("🧸 Pixar", "turn the person into a cute 3D Pixar-style cartoon character, soft lighting, keep the face recognizable"),
-    "comic": ("💥 Комикс", "comic book style illustration of the person, bold ink outlines, vivid colors, halftone shading"),
-    "pixel": ("👾 Пиксель-арт", "turn the person into a pixel art character, 16-bit retro video game style"),
-    "hero": ("🦸 Супергерой", "turn the person into a superhero in a colorful costume with a cape, comic style, keep the face recognizable"),
-    "chibi": ("🍡 Чиби", "turn the person into a cute chibi character with a big head and small body, kawaii style"),
-    "cyber": ("🌆 Киберпанк", "turn the person into a cyberpunk character, neon glow, futuristic outfit, keep the face recognizable"),
-    "cartoon": ("✏️ Мультик", "turn the person into a flat 2D cartoon character, simple shapes, bright colors, keep the face recognizable"),
+    "anime": ("🎌 Аниме", "turn the main subject (person, pet or object) into an anime character, Japanese anime style, cel shading, keep it recognizable"),
+    "pixar": ("🧸 Pixar", "turn the main subject (person, pet or object) into a cute 3D Pixar-style cartoon character, soft lighting, keep it recognizable"),
+    "comic": ("💥 Комикс", "comic book style illustration of the main subject, bold ink outlines, vivid colors, halftone shading"),
+    "pixel": ("👾 Пиксель-арт", "turn the main subject (person, pet or object) into a pixel art character, 16-bit retro video game style"),
+    "hero": ("🦸 Супергерой", "turn the main subject (person, pet or object) into a superhero in a colorful costume with a cape, comic style, keep it recognizable"),
+    "chibi": ("🍡 Чиби", "turn the main subject (person, pet or object) into a cute chibi character with a big head and small body, kawaii style"),
+    "cyber": ("🌆 Киберпанк", "turn the main subject (person, pet or object) into a cyberpunk character, neon glow, futuristic outfit, keep it recognizable"),
+    "cartoon": ("✏️ Мультик", "turn the main subject (person, pet or object) into a flat 2D cartoon character, simple shapes, bright colors, keep it recognizable"),
 }
 
 PLAIN = "plain"
 
 _bot_username = os.environ.get("BOT_USERNAME", "").strip().lstrip("@")
+
+BOT_DESCRIPTION = (
+    "Делаю стикеры из твоих фото с помощью нейросетей: аниме, Pixar, комикс, "
+    "пиксель-арт и другие стили, надписи, фон. Собираю твой личный стикерпак. Бесплатно."
+)
+BOT_SHORT_DESCRIPTION = "Стикеры из фото: аниме, Pixar, комикс и другие стили. Бесплатно."
+BOT_COMMANDS = [
+    {"command": "start", "description": "Начать"},
+    {"command": "mypack", "description": "Мой стикерпак"},
+    {"command": "help", "description": "Как пользоваться"},
+]
 
 
 def telegram(method, **kwargs):
@@ -114,6 +129,10 @@ def get_image_file_id(message):
     if document and document.get("mime_type", "").startswith("image/"):
         return document["file_id"]
 
+    sticker = message.get("sticker")
+    if sticker and not sticker.get("is_animated") and not sticker.get("is_video"):
+        return sticker["file_id"]
+
     return None
 
 
@@ -132,11 +151,11 @@ def style_keyboard():
 
 
 def result_keyboard(again_data=None):
-    row = []
+    first_row = []
     if again_data:
-        row.append({"text": "🔄 Ещё вариант", "callback_data": again_data})
-    row.append({"text": "➕ В мой пак", "callback_data": "pack"})
-    return [row]
+        first_row.append({"text": "🔄 Ещё вариант", "callback_data": again_data})
+    first_row.append({"text": "✍️ Надпись", "callback_data": "caption"})
+    return [first_row, [{"text": "➕ В мой пак", "callback_data": "pack"}]]
 
 
 def build_prompt(params, has_photo):
@@ -156,7 +175,7 @@ def render(chat_id, user_id, origin, style=None, seed=None):
     reply_to = origin["message_id"]
 
     if style == PLAIN or (photo and not text and not style):
-        send_sticker(chat_id, stickers.make_sticker(photo), reply_to, result_keyboard())
+        send_sticker(chat_id, stickers.make_sticker(photo, outline=True), reply_to, result_keyboard())
         return
 
     if style:
@@ -183,6 +202,7 @@ def render(chat_id, user_id, origin, style=None, seed=None):
         if not params["edit"]:
             params["edit"] = text
 
+        telegram("sendChatAction", json={"chat_id": chat_id, "action": "choose_sticker"})
         status = send_message(chat_id, "🎨 Рисую, подожди немного…")
         try:
             result = ai.generate_image(
@@ -205,7 +225,7 @@ def render(chat_id, user_id, origin, style=None, seed=None):
     again = f"again:{style}" if style else "again"
     send_sticker(
         chat_id,
-        stickers.make_sticker(image, params["caption"]),
+        stickers.make_sticker(image, params["caption"], outline=params["remove_background"]),
         reply_to,
         result_keyboard(again),
     )
@@ -220,7 +240,7 @@ def bot_username():
 
 def add_to_pack(user, sticker_file_id):
     """Добавляет стикер в личный пак пользователя, при первом разе создаёт пак."""
-    name = f"pack{user['id']}_by_{bot_username()}"
+    name = pack_name(user["id"])
     sticker = {"sticker": sticker_file_id, "format": "static", "emoji_list": ["😀"]}
 
     result = telegram("addStickerToSet", json={"user_id": user["id"], "name": name, "sticker": sticker})
@@ -240,11 +260,52 @@ def add_to_pack(user, sticker_file_id):
     return "😔 Не получилось добавить стикер в пак. Попробуй ещё раз."
 
 
+def pack_name(user_id):
+    return f"pack{user_id}_by_{bot_username()}"
+
+
+def send_my_pack(chat_id, user_id):
+    name = pack_name(user_id)
+    result = telegram("getStickerSet", json={"name": name})
+    if result.get("ok"):
+        count = len(result["result"].get("stickers", []))
+        send_message(chat_id, f"📦 Твой стикерпак ({count} шт.): https://t.me/addstickers/{name}")
+    else:
+        send_message(chat_id, "📦 Пак пока пуст. Нажми «➕ В мой пак» под любым стикером — и я его создам.")
+
+
+def is_our_sticker(message):
+    author = message.get("from") or {}
+    return bool(message.get("sticker")) and author.get("is_bot") and author.get("username") == bot_username()
+
+
+def caption_sticker(chat_id, sticker_message, caption):
+    """Дописывает текст на уже готовый стикер бота."""
+    image = stickers.open_image(download_file(sticker_message["sticker"]["file_id"]))
+    send_sticker(
+        chat_id,
+        stickers.make_sticker(image, caption),
+        sticker_message["message_id"],
+        [[{"text": "✍️ Надпись", "callback_data": "caption"}], [{"text": "➕ В мой пак", "callback_data": "pack"}]],
+    )
+
+
 def handle_callback(query):
     data = query.get("data") or ""
     message = query.get("message") or {}
     chat_id = message.get("chat", {}).get("id")
     user = query["from"]
+
+    if data == "caption":
+        telegram(
+            "answerCallbackQuery",
+            json={
+                "callback_query_id": query["id"],
+                "text": "Ответь на этот стикер текстом (свайп влево по стикеру → напиши надпись), и я допишу её.",
+                "show_alert": True,
+            },
+        )
+        return
 
     telegram("answerCallbackQuery", json={"callback_query_id": query["id"]})
     if not chat_id:
@@ -297,6 +358,15 @@ def handle_message(message):
         send_message(chat_id, HELP_TEXT)
         return
 
+    if text.startswith("/mypack"):
+        send_my_pack(chat_id, message["from"]["id"])
+        return
+
+    replied = message.get("reply_to_message") or {}
+    if text and is_our_sticker(replied):
+        caption_sticker(chat_id, replied, text)
+        return
+
     file_id = get_image_file_id(message)
     if not file_id and not text:
         send_message(chat_id, "Пришли картинку или напиши, какой стикер нарисовать. /help")
@@ -325,6 +395,29 @@ def safely(handler, update_part, chat_id):
 
 ALLOWED_UPDATES = ["message", "callback_query"]
 _webhook_checked = False
+_recent_updates = collections.OrderedDict()
+
+
+def is_duplicate(update_id):
+    """Telegram повторно присылает событие, если бот долго рисует. Второй раз не обрабатываем."""
+    if update_id is None:
+        return False
+    if update_id in _recent_updates:
+        return True
+    _recent_updates[update_id] = True
+    while len(_recent_updates) > 1000:
+        _recent_updates.popitem(last=False)
+    return not limits.first_time(f"update:{update_id}")
+
+
+def ensure_bot_profile():
+    """Описание бота, которое видно до нажатия «Старт», и меню команд."""
+    current = telegram("getMyCommands").get("result") or []
+    if [c.get("command") for c in current] == [c["command"] for c in BOT_COMMANDS]:
+        return
+    telegram("setMyCommands", json={"commands": BOT_COMMANDS})
+    telegram("setMyDescription", json={"description": BOT_DESCRIPTION})
+    telegram("setMyShortDescription", json={"short_description": BOT_SHORT_DESCRIPTION})
 
 
 def register_webhook():
@@ -350,6 +443,7 @@ def ensure_webhook_up_to_date():
         info = telegram("getWebhookInfo").get("result", {})
         if set(ALLOWED_UPDATES) - set(info.get("allowed_updates") or ALLOWED_UPDATES):
             print("Webhook update:", register_webhook())
+        ensure_bot_profile()
     except Exception as error:
         print("Webhook check error:", repr(error))
 
@@ -385,6 +479,8 @@ def webhook():
     ensure_webhook_up_to_date()
 
     update = request.get_json(silent=True) or {}
+    if is_duplicate(update.get("update_id")):
+        return "OK"
     message = update.get("message")
     query = update.get("callback_query")
 
