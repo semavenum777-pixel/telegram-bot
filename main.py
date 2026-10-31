@@ -789,7 +789,7 @@ def make_photo_edit(chat_id, user_id, origin, scene, again_data):
         stickers.to_jpeg(stickers.open_image(result)),
         origin["message_id"],
         keyboard,
-        caption=f"📸 Сделано в @{bot_username()}",
+        caption=f"📸 Сделано в @{bot_username()} · нейросеть: {ai.last_used['name'] or '—'}",
     )
 
 
