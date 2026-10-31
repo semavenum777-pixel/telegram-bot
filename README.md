@@ -133,7 +133,7 @@ Seedream, FLUX Kontext): какая доступна на вашем балан�
 | `POLLINATIONS_KEY` | нет | Ключ Pollinations — запасная нейросеть (FLUX и GPT Image) |
 | `POLLINATIONS_APP_KEY` | нет | Публичный ключ приложения `pk_...` — название бота на экране подключения баланса |
 | `POLLINATIONS_VIDEO_MODEL` | нет | Видео-модель для «Оживить фото» (по умолчанию `alibaba/wan-2.2-fast`) |
-| `POLLINATIONS_PHOTO_MODELS` | нет | Модели для «Фотосессии» и `/photo` через запятую, пробуются по очереди (по умолчанию Nano Banana, Qwen Image, GPT Image, Seedream, FLUX Kontext, P-Image Edit) |
+| `POLLINATIONS_PHOTO_MODELS` | нет | Порядок предпочтения моделей для «Фотосессии» и `/photo` через запятую; бот берёт первые доступные ключу пользователя и умеющие принимать фото |
 | `VIDEO_SECONDS` | нет | Длина живого видео в секундах (по умолчанию 4) |
 | `FUSIONBRAIN_KEY` | нет | API key Kandinsky (FusionBrain) — только рисование по тексту |
 | `FUSIONBRAIN_SECRET` | нет | Secret key Kandinsky (FusionBrain) |

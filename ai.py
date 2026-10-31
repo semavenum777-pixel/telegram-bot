@@ -506,13 +506,13 @@ def video_configured():
     return bool(_pkey())
 
 
-def _upload_to_pollinations(image_bytes):
+def _upload_to_pollinations(image_bytes, name="photo.jpg", mime="image/jpeg"):
     """Видео-нейросети нужна ссылка на фото: загружаем его в хранилище Pollinations.
     Ссылка не публикуется в галереях, но доступна тому, кто её знает; файл удаляется через 30 дней."""
     response = requests.post(
         f"{POLLINATIONS_MEDIA}/upload",
         headers={"Authorization": f"Bearer {_pkey()}"},
-        files={"file": ("photo.jpg", image_bytes, "image/jpeg")},
+        files={"file": (name, image_bytes, mime)},
         timeout=60,
     )
     _check(response)
@@ -553,48 +553,120 @@ def animate_photo(image_bytes, prompt, portrait=True):
 
 # ---------- реалистичный фоторедактор (как Nano Banana) ----------
 
-# Модели Pollinations для реалистичных фото с тем же лицом — пробуются по очереди.
-# Часть моделей бывает доступна только за купленный баланс: тогда бот просто идёт дальше.
-POLLINATIONS_PHOTO_MODELS = [
+# Модели Pollinations для реалистичных фото с тем же лицом — в порядке предпочтения
+# (лучше всех держат лицо вверху). Бот спрашивает у Pollinations, какие из них доступны
+# конкретному ключу: модели «только за деньги» бесплатному балансу не показываются.
+PREFERRED_PHOTO_MODELS = [
     model.strip() for model in _env(
         "POLLINATIONS_PHOTO_MODELS",
-        _env("POLLINATIONS_PHOTO_MODEL", "")
-        or "google/gemini-2.5-flash-image,qwen/qwen-image-2.1,openai/gpt-image-1-mini,"
-           "bytedance/seedream-4.0,black-forest-labs/flux.1-kontext-pro,prunaai/p-image-edit",
+        "google/gemini-nano-banana-2.1,google/gemini-3.1-flash-image,google/gemini-2.5-flash-image,"
+        "google/gemini-3.1-flash-lite-image,openai/gpt-image-2,openai/gpt-image-1.5,openai/gpt-image-1-mini,"
+        "bytedance/seedream-5.0-flash,bytedance/seedream-5.0-lite,bytedance/seedream-4.5,bytedance/seedream-4.0,"
+        "qwen/qwen-image-3,qwen/qwen-image-2.1,qwen/qwen-image,alibaba/wan-2.7-image,x-ai/grok-imagine-image,"
+        "black-forest-labs/flux.2-pro,black-forest-labs/flux.1-kontext-pro,prunaai/p-image-edit,"
+        "black-forest-labs/flux.2-klein-4b",
     ).split(",") if model.strip()
 ]
 PHOTO_MODEL_NAMES = {
-    "google/gemini-2.5-flash-image": "Nano Banana (Google)",
     "google/gemini-nano-banana-2.1": "Nano Banana 2.1 (Google)",
-    "qwen/qwen-image-2.1": "Qwen Image",
-    "openai/gpt-image-1-mini": "GPT Image (ChatGPT)",
-    "bytedance/seedream-4.0": "Seedream (ByteDance)",
+    "google/gemini-3.1-flash-image": "Nano Banana (Gemini 3.1)",
+    "google/gemini-2.5-flash-image": "Nano Banana (Google)",
+    "google/gemini-3.1-flash-lite-image": "Gemini Flash Lite Image",
+    "openai/gpt-image-2": "GPT Image 2 (ChatGPT)",
+    "openai/gpt-image-1.5": "GPT Image 1.5 (ChatGPT)",
+    "openai/gpt-image-1-mini": "GPT Image mini (ChatGPT)",
+    "qwen/qwen-image-3": "Qwen Image 3",
+    "qwen/qwen-image-2.1": "Qwen Image 2.1",
+    "qwen/qwen-image": "Qwen Image",
+    "bytedance/seedream-5.0-flash": "Seedream 5 (ByteDance)",
+    "bytedance/seedream-4.0": "Seedream 4 (ByteDance)",
     "black-forest-labs/flux.1-kontext-pro": "FLUX Kontext",
-    "prunaai/p-image-edit": "P-Image Edit",
+    "black-forest-labs/flux.2-klein-4b": "FLUX.2 klein",
 }
 PHOTO_SIZE = 1024
+MODELS_CACHE_SECONDS = 15 * 60
 
 # Какая нейросеть сделала последнюю картинку — показываем пользователю под фото.
 last_used = {"name": ""}
+_models_cache = {}  # ключ → (время, список доступных моделей, умеющих править фото)
+
+
+def photo_models_for_key(key):
+    """Модели для правки фото, доступные этому ключу, в порядке предпочтения."""
+    cached = _models_cache.get(key)
+    if cached and time.time() - cached[0] < MODELS_CACHE_SECONDS:
+        return cached[1]
+    try:
+        response = requests.get(
+            "https://gen.pollinations.ai/image/models",
+            headers={"Authorization": f"Bearer {key}"},
+            timeout=20,
+        )
+        response.raise_for_status()
+        entries = response.json()
+        entries = entries.get("data", []) if isinstance(entries, dict) else entries
+        editable = set()
+        for entry in entries:
+            names = {entry.get("id"), entry.get("name"), *(entry.get("aliases") or [])} - {None}
+            takes_image = "image" in (entry.get("input_modalities") or []) or any(
+                "edits" in endpoint for endpoint in entry.get("supported_endpoints") or []
+            )
+            makes_image = "image" in (entry.get("output_modalities") or ["image"])
+            healthy = (entry.get("health") or {}).get("status") != "down"
+            if takes_image and makes_image and healthy:
+                editable |= names
+        models = [m for m in PREFERRED_PHOTO_MODELS if m in editable]
+        if not models:
+            print("No editable photo models for this key; listing:", sorted(editable)[:20])
+    except Exception as error:
+        print("Model list error:", repr(error))
+        models = list(PREFERRED_PHOTO_MODELS)  # не смогли узнать — пробуем по списку
+    _models_cache[key] = (time.time(), models)
+    return models
+
+
+def _pollinations_edit_by_url(key, model, prompt, image_url, timeout, seed):
+    """Правка фото по ссылке (JSON) — этот формат одинаково понимают все модели Pollinations."""
+    payload = {"prompt": prompt, "model": model, "image": image_url, "size": f"{PHOTO_SIZE}x{PHOTO_SIZE}"}
+    if seed is not None:
+        payload["seed"] = seed
+    response = requests.post(
+        f"{POLLINATIONS_API}/images/edits",
+        headers={"Authorization": f"Bearer {key}"},
+        json=payload,
+        timeout=timeout,
+    )
+    _check(response)
+    item = response.json()["data"][0]
+    if item.get("b64_json"):
+        return base64.b64decode(item["b64_json"])
+    image = requests.get(item["url"], timeout=60)
+    image.raise_for_status()
+    return image.content
 
 
 def edit_photo(prompt, photo_png, photo_png_small, seed=None):
-    """Реалистичная правка фото: модели Pollinations по очереди, потом обычная цепочка нейросетей."""
-    photo = {"large": photo_png, "small": photo_png_small}
+    """Реалистичная правка фото: лучшие доступные модели Pollinations, потом обычная цепочка нейросетей.
+    Фото загружается в хранилище Pollinations по неопубликованной ссылке (удаляется через 30 дней)."""
     deadline = time.monotonic() + 170  # остальное время — на запасные нейросети (Vercel даёт 300 с)
     key = _pkey()
     last_used["no_credits"] = False
+    last_used["tried"] = []
     if key:
         refused = 0
-        for model in POLLINATIONS_PHOTO_MODELS:
+        image_url = None
+        for model in photo_models_for_key(key)[:4]:
             group = f"photo:{model}:{key[-8:]}"  # у каждого ключа свой баланс и свой доступ
             remaining = deadline - time.monotonic()
             if remaining < 20:
                 break
             if _exhausted_until.get(group, 0) > time.time():
                 continue
+            last_used["tried"].append(model)
             try:
-                result = _pollinations_image(prompt, photo, min(120, remaining), seed, size=PHOTO_SIZE, model=model)
+                if image_url is None:
+                    image_url = _upload_to_pollinations(photo_png, "photo.png", "image/png")
+                result = _pollinations_edit_by_url(key, model, prompt, image_url, min(120, remaining), seed)
                 last_used["name"] = PHOTO_MODEL_NAMES.get(model, model)
                 return result
             except LimitReached as error:
@@ -603,10 +675,9 @@ def edit_photo(prompt, photo_png, photo_png_small, seed=None):
                 cooldown = NO_CREDITS_COOLDOWN_SECONDS if error.no_credits else EXHAUSTED_COOLDOWN_SECONDS
                 _exhausted_until[group] = time.time() + cooldown
             except Exception as error:
-                # 4xx «модель не умеет / нет доступа» — не дёргаем её снова какое-то время.
                 print(f"{model} failed:", repr(error))
                 _exhausted_until[group] = time.time() + EXHAUSTED_COOLDOWN_SECONDS
-        # Все модели ответили «нет баланса» — скорее всего, бесплатный баланс закончился.
+        # Модели ответили «нет баланса» — скорее всего, бесплатный баланс закончился.
         last_used["no_credits"] = refused > 0
     return generate_image(prompt, photo_png, photo_png_small, seed=seed, size=PHOTO_SIZE)
 

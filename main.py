@@ -887,6 +887,12 @@ def send_balance(chat_id, user_id):
     balance = ai.pollen_balance(key)
     text = f"💰 На твоём балансе Pollinations: {balance:.2f} Pollen." if isinstance(balance, (int, float)) \
         else "💰 Баланс узнать не удалось, но аккаунт подключён."
+    models = ai.photo_models_for_key(key)
+    if models:
+        names = ", ".join(ai.PHOTO_MODEL_NAMES.get(m, m) for m in models[:4])
+        text += f"\n📸 Для фотосессий тебе доступны: {names}."
+    else:
+        text += "\n📸 Сильные модели для фото на бесплатном балансе сейчас недоступны — фото делает простая нейросеть."
     send_message(chat_id, text + "\nПополнить или поменять лимит можно на enter.pollinations.ai. /disconnect — отключить.")
 
 
