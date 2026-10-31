@@ -20,6 +20,15 @@ def to_png_bytes(image, max_side=None):
     return output.getvalue()
 
 
+def crop_square(image):
+    """Квадрат по центру; у вертикальных фото чуть выше центра — там обычно лицо."""
+    w, h = image.size
+    side = min(w, h)
+    left = (w - side) // 2
+    top = int((h - side) * 0.3)
+    return image.crop((left, top, left + side, top + side))
+
+
 def fit_to_sticker(image):
     # Одна сторона должна быть ровно 512, другая — не больше 512.
     scale = STICKER_SIZE / max(image.size)

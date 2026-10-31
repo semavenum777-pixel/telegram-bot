@@ -96,6 +96,8 @@ def _cloudflare_image(prompt, photo, timeout, seed, model=None):
         files["seed"] = (None, str(seed))
     if photo:
         files["input_image_0"] = ("photo.png", photo["small"], "image/png")
+        if photo.get("ref_small"):
+            files["input_image_1"] = ("reference.png", photo["ref_small"], "image/png")
 
     response = requests.post(
         f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/run/{model or CF_IMAGE_MODEL}",
@@ -125,7 +127,9 @@ def _cloudflare_schnell(prompt, photo, timeout, seed):
 def _gemini_image(prompt, photo, timeout, seed):
     parts = [{"text": f"{prompt}. Square image."}]
     if photo:
-        parts.append({"inline_data": {"mime_type": "image/png", "data": base64.b64encode(photo["large"]).decode()}})
+        for key in ("large", "ref_large"):
+            if photo.get(key):
+                parts.append({"inline_data": {"mime_type": "image/png", "data": base64.b64encode(photo[key]).decode()}})
 
     config = {"responseModalities": ["TEXT", "IMAGE"]}
     if seed is not None:
@@ -155,7 +159,8 @@ def _pollinations_image(prompt, photo, timeout, seed, model=None):
             f"{POLLINATIONS_API}/images/edits",
             headers=headers,
             data={"prompt": prompt, "model": model, "size": size},
-            files={"image": ("photo.png", photo["large"], "image/png")},
+            files=[("image", ("photo.png", photo["large"], "image/png"))]
+            + ([("image", ("reference.png", photo["ref_large"], "image/png"))] if photo.get("ref_large") else []),
             timeout=timeout,
         )
     else:
@@ -295,9 +300,12 @@ def ai_configured(has_photo=False):
     return any(p["enabled"]() and (p["photo"] or not has_photo) for p in PROVIDERS)
 
 
-def generate_image(prompt, photo_png=None, photo_png_small=None, seed=None):
-    """Возвращает картинку (bytes) от первой сработавшей нейросети."""
-    photo = {"large": photo_png, "small": photo_png_small} if photo_png else None
+def generate_image(prompt, photo_png=None, photo_png_small=None, seed=None, ref_png=None, ref_png_small=None):
+    """Возвращает картинку (bytes) от первой сработавшей нейросети.
+    ref_png — необязательная вторая картинка-образец (например, уже готовый стикер этого персонажа)."""
+    photo = None
+    if photo_png:
+        photo = {"large": photo_png, "small": photo_png_small, "ref_large": ref_png, "ref_small": ref_png_small}
     deadline = time.monotonic() + TOTAL_BUDGET_SECONDS
 
     for provider in _available(has_photo=bool(photo)):
