@@ -288,12 +288,20 @@ PROVIDERS = [
 _exhausted_until = {}
 
 
+# Для фото первыми идут нейросети, которые лучше сохраняют сходство с человеком
+# (если их ключи подключены). Для рисования по тексту порядок обычный.
+PHOTO_PRIORITY = {"Gemini": 0, "BFL": 1}
+
+
 def _available(has_photo):
     now = time.time()
-    return [
+    providers = [
         p for p in PROVIDERS
         if p["enabled"]() and (p["photo"] or not has_photo) and _exhausted_until.get(p["group"], 0) <= now
     ]
+    if has_photo:
+        providers.sort(key=lambda p: PHOTO_PRIORITY.get(p["group"], len(PHOTO_PRIORITY)))
+    return providers
 
 
 def ai_configured(has_photo=False):
