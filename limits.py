@@ -9,12 +9,24 @@ import os
 
 import requests
 
-REDIS_URL = (
-    os.environ.get("UPSTASH_REDIS_REST_URL") or os.environ.get("KV_REST_API_URL") or ""
-).strip().rstrip("/")
-REDIS_TOKEN = (
-    os.environ.get("UPSTASH_REDIS_REST_TOKEN") or os.environ.get("KV_REST_API_TOKEN") or ""
-).strip()
+def _find_redis_env():
+    """Ищет адрес и токен базы при любом префиксе, который Vercel добавил к переменным
+    (например, STORAGE_KV_REST_API_URL или STORAGE_REST_API_URL)."""
+    for url_suffix, token_suffix in (
+        ("UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN"),
+        ("KV_REST_API_URL", "KV_REST_API_TOKEN"),
+        ("REDIS_REST_URL", "REDIS_REST_TOKEN"),
+        ("REST_API_URL", "REST_API_TOKEN"),
+    ):
+        for name, value in sorted(os.environ.items()):
+            if name.endswith(url_suffix) and value.strip().startswith("https://"):
+                token = os.environ.get(name[: -len(url_suffix)] + token_suffix, "").strip()
+                if token:
+                    return value.strip().rstrip("/"), token
+    return "", ""
+
+
+REDIS_URL, REDIS_TOKEN = _find_redis_env()
 DAILY_LIMIT = int(os.environ.get("DAILY_LIMIT", "20"))
 
 
