@@ -23,6 +23,8 @@ def to_png_bytes(image, max_side=None):
 def crop_square(image):
     """Квадрат по центру; у вертикальных фото чуть выше центра — там обычно лицо."""
     w, h = image.size
+    if w / h > 1.6:
+        return image  # широкий снимок (например, групповое фото) не режем
     side = min(w, h)
     left = (w - side) // 2
     top = int((h - side) * 0.3)

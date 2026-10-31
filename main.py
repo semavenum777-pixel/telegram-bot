@@ -234,9 +234,19 @@ def share_keyboard(name):
     return [[{"text": "📤 Поделиться паком", "url": url}]]
 
 
+# Добавляется ко всем заданиям с фото, чтобы результат был похож на человека на снимке.
+IDENTITY = (
+    "The result must clearly look like the same person (or pet) from the photo: keep the exact "
+    "face shape, facial features, eyes, nose, mouth, skin tone, hairstyle, hair color, glasses "
+    "and facial hair. Change only what was asked."
+)
+
+
 def build_prompt(params, has_photo):
     prompt = params["edit"]
-    if not has_photo:
+    if has_photo:
+        prompt = f"{prompt}. {IDENTITY}"
+    else:
         prompt = f"{prompt}, sticker style illustration, bold clean outlines"
     if params["remove_background"]:
         prompt = f"{prompt}, isolated on a plain pure white background"
@@ -282,11 +292,13 @@ def render(chat_id, user_id, origin, style=None, seed=None, params=None, again_d
 
         telegram("sendChatAction", json={"chat_id": chat_id, "action": "choose_sticker"})
         status = send_message(chat_id, "🎨 Рисую, подожди немного…")
+        # Обрезаем вокруг центра: лицо крупнее — нейросеть лучше сохраняет сходство.
+        source = stickers.crop_square(photo) if photo else None
         try:
             result = ai.generate_image(
                 build_prompt(params, has_photo=bool(photo)),
-                photo_png=stickers.to_png_bytes(photo, max_side=1024) if photo else None,
-                photo_png_small=stickers.to_png_bytes(photo, max_side=ai.CF_INPUT_MAX_SIDE) if photo else None,
+                photo_png=stickers.to_png_bytes(source, max_side=1024) if photo else None,
+                photo_png_small=stickers.to_png_bytes(source, max_side=ai.CF_INPUT_MAX_SIDE) if photo else None,
                 seed=seed,
             )
         except ai.AIUnavailable:
