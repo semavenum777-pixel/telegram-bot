@@ -156,6 +156,23 @@ def new_year_greeting():
     return f"С Новым {year} годом!"
 
 
+# Живое видео из фото: ключ → (кнопка, что должно происходить в видео).
+VIDEO_MOTIONS = {
+    "alive": ("✨ Ожить", "the person comes alive: natural blinking, a gentle smile, slight head movement, breathing"),
+    "smile": ("😊 Улыбка", "the person slowly breaks into a warm genuine smile and looks at the camera"),
+    "wave": ("👋 Привет", "the person smiles and waves hello at the camera with one hand"),
+    "wink": ("😉 Подмигнуть", "the person playfully winks at the camera and smiles"),
+    "laugh": ("😂 Смех", "the person bursts out laughing joyfully"),
+    "dance": ("💃 Танец", "the person dances happily to music, moving shoulders and head"),
+    "kiss": ("😘 Воздушный поцелуй", "the person sends an air kiss to the camera"),
+    "wow": ("😮 Удивление", "the person looks surprised with wide eyes and an open mouth, then smiles"),
+}
+VIDEO_STYLE = (
+    "{motion}. Realistic, the same person with exactly the same face, hair and clothes as in the photo, "
+    "smooth natural motion, static camera."
+)
+
+
 # Быстрые надписи под стикером (без эмодзи — их нет в шрифте).
 QUICK_CAPTIONS = ["Ок", "Спасибо", "Ахах", "Люблю"]
 
@@ -350,6 +367,8 @@ def style_keyboard():
         {"text": "🎲 Случайный стиль", "callback_data": f"style:{RANDOM}"},
         {"text": "🖼 Просто стикер", "callback_data": f"style:{PLAIN}"},
     ])
+    if ai.video_configured():
+        rows.insert(0, [{"text": "🎬 Оживить фото — живое видео", "callback_data": "video"}])
     rows.append([
         {"text": "🖼 Аватарка", "callback_data": "ava"},
         {"text": "🎞 GIF", "callback_data": "photogif"},
@@ -697,6 +716,56 @@ def send_gif_version(chat_id, message, effect):
     send_animation(chat_id, animate.make_gif(image, effect), message["message_id"], f"🎞 Сделано в @{bot_username()}")
 
 
+def video_keyboard():
+    buttons = [{"text": label, "callback_data": f"vid:{key}"} for key, (label, _) in VIDEO_MOTIONS.items()]
+    return _pairs(buttons)
+
+
+def make_live_video(chat_id, user_id, origin, motion):
+    """🎬 Живое видео из фото через видео-нейросеть."""
+    file_id = get_image_file_id(origin)
+    if not file_id:
+        send_message(chat_id, "Не нашёл фото — пришли его ещё раз.")
+        return
+    if not limits.take(user_id):
+        send_message(chat_id, f"⏳ Лимит на сегодня исчерпан: можно {plural_stickers(limits.DAILY_LIMIT)} в день.")
+        return
+
+    photo = stickers.open_image(download_file(file_id))
+    status = send_message(chat_id, "🎬 Оживляю фото — это займёт 1–3 минуты…")
+    telegram("sendChatAction", json={"chat_id": chat_id, "action": "upload_video"})
+    try:
+        video = ai.animate_photo(
+            stickers.to_jpeg(photo).getvalue(),
+            VIDEO_STYLE.format(motion=VIDEO_MOTIONS[motion][1]),
+            portrait=photo.height >= photo.width,
+        )
+    except ai.AIUnavailable:
+        send_message(
+            chat_id,
+            "😔 Видео-нейросеть сейчас недоступна или закончился её баланс. "
+            "Пока можно сделать 🎞 GIF — он работает всегда.",
+        )
+        return
+    finally:
+        if status.get("ok"):
+            delete_message(chat_id, status["result"]["message_id"])
+
+    telegram(
+        "sendAnimation",
+        data={
+            "chat_id": chat_id,
+            "caption": f"🎬 Сделано в @{bot_username()}",
+            "reply_parameters": json.dumps({"message_id": origin["message_id"], "allow_sending_without_reply": True}),
+            "reply_markup": json.dumps({"inline_keyboard": [
+                [{"text": "🔄 Ещё раз", "callback_data": f"vid:{motion}"},
+                 {"text": "🎞 В живой стикер", "callback_data": "vid2sticker"}],
+            ]}),
+        },
+        files={"animation": ("video.mp4", video, "video/mp4")},
+    )
+
+
 def photo_to_gif(chat_id, origin):
     """🎞 GIF прямо из фото: фото оживает с одним из эффектов (без нейросети, без лимитов)."""
     file_id = get_image_file_id(origin)
@@ -825,6 +894,19 @@ def handle_callback(query):
 
     if data in EMOTION_SETS:
         make_emotion_pack(chat_id, user, origin, kind=data)
+        return
+
+    if data == "vid2sticker":
+        if get_animation_file_id(message):
+            gif_to_sticker(chat_id, message)
+        return
+
+    if data == "video":
+        send_message(chat_id, "🎬 Что должно происходить в видео? 👇", reply_to=origin["message_id"], keyboard=video_keyboard())
+        return
+
+    if data.startswith("vid:") and data[4:] in VIDEO_MOTIONS:
+        make_live_video(chat_id, user["id"], origin, data[4:])
         return
 
     if data == "photogif":
