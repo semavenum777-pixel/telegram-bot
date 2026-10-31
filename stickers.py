@@ -148,3 +148,57 @@ def make_sticker(image, caption="", outline=False):
     image.save(output, format="WEBP")
     output.seek(0)
     return output
+
+
+def to_jpeg(image, quality=92):
+    output = io.BytesIO()
+    background = Image.new("RGB", image.size, "white")
+    background.paste(image, mask=image.getchannel("A"))
+    background.save(output, format="JPEG", quality=quality)
+    output.seek(0)
+    return output
+
+
+def _draw_block(draw, text, width, top, max_height, fill, stroke_fill, from_bottom=False):
+    """Текст по центру, автоматически уменьшается, чтобы влезть в ширину и высоту блока."""
+    size = max(24, width // 9)
+    while True:
+        font = _load_font(size)
+        lines = _wrap_text(draw, text, font, width * 0.92)
+        line_height = int(size * 1.15)
+        widest = max(draw.textlength(line, font=font) for line in lines)
+        if (widest <= width * 0.92 and len(lines) * line_height <= max_height) or size <= 18:
+            break
+        size -= 4
+
+    stroke = max(2, size // 12)
+    y = top - len(lines) * line_height if from_bottom else top
+    for line in lines:
+        x = (width - draw.textlength(line, font=font)) / 2
+        draw.text((x, y), line, font=font, fill=fill, stroke_width=stroke, stroke_fill=stroke_fill)
+        y += line_height
+
+
+def make_meme(image, top="", bottom=""):
+    """Классический мем: белые заглавные буквы с чёрной обводкой сверху и снизу. Без нейросети."""
+    image = image.copy()
+    image.thumbnail((1080, 1080), Image.LANCZOS)
+    draw = ImageDraw.Draw(image)
+    margin = image.height // 30
+    if top:
+        _draw_block(draw, top.upper(), image.width, margin, image.height // 3, "white", "black")
+    if bottom:
+        _draw_block(draw, bottom.upper(), image.width, image.height - margin, image.height // 3, "white", "black", from_bottom=True)
+    return to_jpeg(image)
+
+
+def make_card(image, greeting):
+    """Открытка: картинка и поздравление золотыми буквами внизу."""
+    image = image.copy()
+    image.thumbnail((1080, 1080), Image.LANCZOS)
+    draw = ImageDraw.Draw(image)
+    _draw_block(
+        draw, greeting, image.width, image.height - image.height // 25, image.height // 4,
+        (255, 215, 90), (90, 20, 20), from_bottom=True,
+    )
+    return to_jpeg(image)

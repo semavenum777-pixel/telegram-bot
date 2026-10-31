@@ -1,4 +1,5 @@
 import collections
+import datetime
 import hashlib
 import json
 import os
@@ -11,6 +12,7 @@ from flask import Flask, abort, request
 
 import ai
 import limits
+import pages
 import stickers
 
 app = Flask(__name__)
@@ -33,7 +35,10 @@ START_TEXT = (
     "• фото с подписью, что изменить — "
     "«сделай аниме, фон космос, надпись \"Привет\"»;\n"
     "• только текст — нарисую стикер с нуля: "
-    "«кот в очках, без фона, надпись \"Йо\"».\n\n"
+    "«кот в очках, без фона, надпись \"Йо\"»;\n"
+    "• фото с подписью /mem Текст сверху | Текст снизу — сделаю мем.\n\n"
+    "Ещё умею аватарки в любом стиле, а с ноября — новогодние открытки и стикеры 🎄\n"
+    "Добавь меня в чат с друзьями: ответь на любое фото командой /sticker.\n\n"
     "Понравился стикер — жми «➕ В мой пак», и я соберу твой личный стикерпак.\n\n"
     "/mypack — мой стикерпак, /help — подробнее"
 )
@@ -52,7 +57,10 @@ HELP_TEXT = (
     "🔄 Ещё вариант — перерисовать по тому же запросу;\n"
     "✍️ Надпись — ответь на стикер текстом, и я допишу его на стикер;\n"
     "➕ В мой пак — добавить в твой личный стикерпак.\n\n"
-    "Можно прислать и готовый стикер — переделаю его в другом стиле.\n"
+    "Можно прислать и готовый стикер — переделаю его в другом стиле.\n\n"
+    "🖼 Аватарка — кнопка под фото: картинка для профиля в выбранном стиле.\n"
+    "😂 Мем — пришли фото с подписью /mem Верх | Низ.\n"
+    "👥 В группе — добавь меня в чат и ответь на фото командой /sticker (или /sticker аниме).\n"
     "/mypack — ссылка на твой стикерпак."
 ) + (f"\n\nВ день можно сделать до {limits.DAILY_LIMIT} стикеров через нейросеть." if limits.enabled() else "")
 
@@ -72,7 +80,17 @@ STYLES = {
     "cartoon": ("✏️ Мультик", "turn the main subject (person, pet or object) into a flat 2D cartoon character, simple shapes, bright colors, keep it recognizable"),
 }
 
+# Новогодние стили: показываются в кнопках с 1 ноября по 14 января.
+NEW_YEAR_STYLES = {
+    "santa": ("🎅 Дед Мороз", "turn the main subject into Ded Moroz (Russian Father Frost) with a red fur coat, white beard and festive hat, cute cartoon style, keep it recognizable"),
+    "snow": ("❄️ Снегурочка", "turn the main subject into a winter fairy-tale character in a light blue fur coat with snowflakes, cute cartoon style, keep it recognizable"),
+    "sweater": ("🦌 Свитер с оленями", "the main subject wearing a cozy knitted Christmas sweater with deer, holding a cup of hot cocoa, cute cartoon style, keep it recognizable"),
+    "elf": ("🧝 Эльф", "turn the main subject into a cheerful Christmas elf in a green outfit with pointy ears, cute cartoon style, keep it recognizable"),
+}
+ALL_STYLES = {**STYLES, **NEW_YEAR_STYLES}
+
 PLAIN = "plain"
+NO_AGAIN = "-"
 RANDOM = "random"
 
 # Набор эмоций: ключ, эмодзи для пака, надпись, описание для нейросети.
@@ -96,6 +114,45 @@ EMOTION_REFERENCE = (
     "design, face, art style and colors as in image 2."
 )
 
+NEW_YEAR_EMOTIONS = [
+    ("ny", "🎄", "С Новым годом!", "joyful, wearing a Santa hat, celebrating with confetti"),
+    ("gift", "🎁", "Подарки!", "excited, holding a big wrapped gift box"),
+    ("cheers", "🥂", "Ура!", "cheering and raising a glass of sparkling juice, fireworks"),
+    ("mandarin", "🍊", "Мандаринки", "happily eating tangerines"),
+    ("tired", "😴", "1 января", "sleepy and tired, wrapped in a blanket on January 1st"),
+    ("wish", "🌟", "Загадал", "making a wish with eyes closed, sparkles around"),
+]
+EMOTION_SETS = {
+    "emo": ("😊 Делаю набор из 6 эмоций", EMOTIONS),
+    "emony": ("🎄 Делаю новогодний набор из 6 стикеров", NEW_YEAR_EMOTIONS),
+}
+
+AVATAR_SUFFIX = (
+    "Square profile picture: head and shoulders portrait centered, vibrant colorful background."
+)
+CARD_PROMPT = (
+    "Festive New Year greeting card illustration of the main subject: cozy winter scene with a decorated "
+    "Christmas tree, garlands, snow and gifts, warm magical lighting, cute cartoon style, keep it recognizable. "
+    "Leave the bottom quarter of the image calm for a greeting text."
+)
+
+
+def new_year_season():
+    mode = os.environ.get("NEW_YEAR_MODE", "auto").strip().lower()
+    if mode in ("on", "1", "true", "yes"):
+        return True
+    if mode in ("off", "0", "false", "no"):
+        return False
+    today = datetime.date.today()
+    return today.month in (11, 12) or (today.month == 1 and today.day <= 14)
+
+
+def new_year_greeting():
+    today = datetime.date.today()
+    year = today.year + 1 if today.month >= 11 else today.year
+    return f"С Новым {year} годом!"
+
+
 # Быстрые надписи под стикером (без эмодзи — их нет в шрифте).
 QUICK_CAPTIONS = ["Ок", "Спасибо", "Ахах", "Люблю"]
 
@@ -118,15 +175,26 @@ SURPRISES = [
 _bot_username = os.environ.get("BOT_USERNAME", "").strip().lstrip("@")
 
 BOT_DESCRIPTION = (
-    "Делаю стикеры из твоих фото с помощью нейросетей: аниме, Pixar, комикс, "
-    "пиксель-арт и другие стили, надписи, фон. Собираю твой личный стикерпак. Бесплатно."
+    "Делаю стикеры из твоих фото с помощью нейросетей: аниме, Pixar, LEGO, комикс и другие стили. "
+    "Набор из 6 эмоций с твоим лицом, аватарки, мемы, новогодние открытки. "
+    "Собираю твой личный стикерпак. Работаю и в групповых чатах. Бесплатно."
 )
 BOT_SHORT_DESCRIPTION = "Стикеры из фото: аниме, Pixar, комикс и другие стили. Бесплатно."
 BOT_COMMANDS = [
     {"command": "start", "description": "Начать"},
+    {"command": "sticker", "description": "Стикер из фото (в группе — ответом на фото)"},
+    {"command": "mem", "description": "Мем: /mem текст сверху | текст снизу"},
     {"command": "mypack", "description": "Мой стикерпак"},
     {"command": "help", "description": "Как пользоваться"},
 ]
+
+GROUP_HELP = (
+    "👋 Привет! Я делаю стикеры прямо в чате.\n\n"
+    "• Ответь на фото командой /sticker — выберешь стиль кнопками;\n"
+    "• /sticker аниме (ответом на фото) — сразу в нужном стиле;\n"
+    "• /sticker кот в очках — нарисую с нуля;\n"
+    "• /mem Верх | Низ (ответом на фото) — сделаю мем."
+)
 
 
 def plural_stickers(n):
@@ -180,6 +248,32 @@ def send_sticker(chat_id, sticker_file, reply_to=None, keyboard=None):
     )
 
 
+def send_photo(chat_id, photo_file, reply_to=None, keyboard=None, caption=None):
+    data = {"chat_id": chat_id}
+    if caption:
+        data["caption"] = caption
+    if reply_to:
+        data["reply_parameters"] = json.dumps(
+            {"message_id": reply_to, "allow_sending_without_reply": True}
+        )
+    if keyboard:
+        data["reply_markup"] = json.dumps({"inline_keyboard": keyboard})
+    return telegram(
+        "sendPhoto",
+        data=data,
+        files={"photo": ("image.jpg", photo_file, "image/jpeg")},
+    )
+
+
+def split_command(text):
+    """'/sticker@my_bot аниме' → ('/sticker', 'аниме', 'my_bot')."""
+    if not text.startswith("/"):
+        return "", text, ""
+    head, _, args = text.partition(" ")
+    command, _, mention = head.partition("@")
+    return command.lower(), args.strip(), mention
+
+
 def get_image_file_id(message):
     photos = message.get("photo")
     if photos:
@@ -197,21 +291,43 @@ def get_image_file_id(message):
 
 
 def message_text(message):
-    return (message.get("text") or message.get("caption") or "").strip()
+    text = (message.get("text") or message.get("caption") or "").strip()
+    command, args, _ = split_command(text)
+    if command == "/sticker":
+        return args  # «/sticker аниме» → просьба «аниме»
+    return text
+
+
+def _pairs(buttons):
+    return [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+
+
+def style_buttons(styles, prefix):
+    return [{"text": label, "callback_data": f"{prefix}:{key}"} for key, (label, _) in styles.items()]
 
 
 def style_keyboard():
-    buttons = [
-        {"text": label, "callback_data": f"style:{key}"}
-        for key, (label, _) in STYLES.items()
-    ]
-    rows = [[{"text": "😊 Набор эмоций — 6 стикеров в пак", "callback_data": "emo"}]]
-    rows += [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows = []
+    if new_year_season():
+        rows.append([{"text": "🎄 Новогодний набор — 6 стикеров в пак", "callback_data": "emony"}])
+        rows.append([{"text": "🎁 Новогодняя открытка", "callback_data": "card"}])
+        rows += _pairs(style_buttons(NEW_YEAR_STYLES, "style"))
+    rows.append([{"text": "😊 Набор эмоций — 6 стикеров в пак", "callback_data": "emo"}])
+    rows += _pairs(style_buttons(STYLES, "style"))
     rows.append([
         {"text": "🎲 Случайный стиль", "callback_data": f"style:{RANDOM}"},
         {"text": "🖼 Просто стикер", "callback_data": f"style:{PLAIN}"},
     ])
+    rows.append([
+        {"text": "🖼 Аватарка", "callback_data": "ava"},
+        {"text": "😂 Мем", "callback_data": "memhint"},
+    ])
     return rows
+
+
+def avatar_keyboard():
+    styles = {**(NEW_YEAR_STYLES if new_year_season() else {}), **STYLES}
+    return _pairs(style_buttons(styles, "ava"))
 
 
 def result_keyboard(again_data=None):
@@ -253,21 +369,26 @@ def build_prompt(params, has_photo):
     return prompt
 
 
-def render(chat_id, user_id, origin, style=None, seed=None, params=None, again_data=None):
-    """Делает стикер по сообщению пользователя origin и отправляет его ответом на это сообщение."""
+def render(chat_id, user_id, origin, style=None, seed=None, params=None, again_data=None, mode="sticker"):
+    """Делает стикер (или аватарку / открытку) по сообщению origin и отправляет ответом на него.
+    mode: "sticker", "avatar" или "card"."""
     text = message_text(origin)
     file_id = get_image_file_id(origin)
     photo = stickers.open_image(download_file(file_id)) if file_id else None
     reply_to = origin["message_id"]
 
-    if style == PLAIN or (photo and not text and not style):
+    if mode == "sticker" and (style == PLAIN or (photo and not text and not style and not params)):
         send_sticker(chat_id, stickers.make_sticker(photo, outline=True), reply_to, result_keyboard())
         return
 
-    if params:
+    if mode == "avatar":
+        params = {"edit": f"{ALL_STYLES[style][1]}. {AVATAR_SUFFIX}", "caption": "", "remove_background": False}
+    elif mode == "card":
+        params = {"edit": CARD_PROMPT, "caption": "", "remove_background": False}
+    elif params:
         pass
     elif style:
-        params = {"edit": STYLES[style][1], "caption": "", "remove_background": True}
+        params = {"edit": ALL_STYLES[style][1], "caption": "", "remove_background": True}
     else:
         params = ai.parse_request(text, has_photo=bool(photo))
         # У обычного фото фон неоднородный: сначала просим нейросеть заменить его на белый.
@@ -290,7 +411,8 @@ def render(chat_id, user_id, origin, style=None, seed=None, params=None, again_d
         if not params["edit"]:
             params["edit"] = text
 
-        telegram("sendChatAction", json={"chat_id": chat_id, "action": "choose_sticker"})
+        action = "choose_sticker" if mode == "sticker" else "upload_photo"
+        telegram("sendChatAction", json={"chat_id": chat_id, "action": action})
         status = send_message(chat_id, "🎨 Рисую, подожди немного…")
         # Обрезаем вокруг центра: лицо крупнее — нейросеть лучше сохраняет сходство.
         source = stickers.crop_square(photo) if photo else None
@@ -300,6 +422,7 @@ def render(chat_id, user_id, origin, style=None, seed=None, params=None, again_d
                 photo_png=stickers.to_png_bytes(source, max_side=1024) if photo else None,
                 photo_png_small=stickers.to_png_bytes(source, max_side=ai.CF_INPUT_MAX_SIDE) if photo else None,
                 seed=seed,
+                size=ai.IMAGE_SIZE if mode == "sticker" else 1024,
             )
         except ai.AIUnavailable:
             send_message(chat_id, "😔 Все нейросети сейчас заняты или закончился дневной лимит. Попробуй позже.")
@@ -309,10 +432,27 @@ def render(chat_id, user_id, origin, style=None, seed=None, params=None, again_d
                 delete_message(chat_id, status["result"]["message_id"])
         image = stickers.open_image(result)
 
+    if mode == "avatar":
+        send_photo(
+            chat_id, stickers.to_jpeg(image), reply_to,
+            [[{"text": "🔄 Ещё вариант", "callback_data": f"ava:{style}"}]],
+            caption="🖼 Твоя аватарка — сохрани и поставь в профиль",
+        )
+        return
+    if mode == "card":
+        send_photo(
+            chat_id, stickers.make_card(image, new_year_greeting()), reply_to,
+            [[{"text": "🔄 Ещё вариант", "callback_data": "card"}]],
+            caption=f"🎁 Открытка готова — перешли её друзьям! Сделано в @{bot_username()}",
+        )
+        return
+
     if params["remove_background"]:
         image = stickers.remove_plain_background(image)
 
     again = again_data or (f"again:{style}" if style else "again")
+    if again == NO_AGAIN:
+        again = None
     send_sticker(
         chat_id,
         stickers.make_sticker(image, params["caption"], outline=params["remove_background"]),
@@ -363,8 +503,9 @@ def add_to_pack(chat_id, user, sticker_file_id, reply_to=None):
         send_message(chat_id, "😔 Не получилось добавить стикер в пак. Попробуй ещё раз.", reply_to=reply_to)
 
 
-def make_emotion_pack(chat_id, user, origin):
+def make_emotion_pack(chat_id, user, origin, kind="emo"):
     """Делает из одного фото 6 стикеров с разными эмоциями и складывает их в пак."""
+    intro, emotions = EMOTION_SETS[kind]
     file_id = get_image_file_id(origin)
     if not file_id:
         send_message(chat_id, "Для набора эмоций нужно фото.")
@@ -377,14 +518,14 @@ def make_emotion_pack(chat_id, user, origin):
     photo = stickers.crop_square(stickers.open_image(download_file(file_id)))
     photo_large = stickers.to_png_bytes(photo, max_side=1024)
     photo_small = stickers.to_png_bytes(photo, max_side=ai.CF_INPUT_MAX_SIDE)
-    status = send_message(chat_id, "😊 Делаю набор из 6 эмоций — это займёт около минуты…")
+    status = send_message(chat_id, f"{intro} — это займёт около минуты…")
     started = time.monotonic()
     done = 0
     # Одинаковый seed и первый стикер как образец — чтобы все 6 были одним персонажем.
     seed = random.randint(0, 2**31 - 1)
     reference = None
 
-    for _, emoji, caption, mood in EMOTIONS:
+    for _, emoji, caption, mood in emotions:
         if time.monotonic() - started > 200:
             break
         if not limits.take(user["id"]):
@@ -427,6 +568,23 @@ def make_emotion_pack(chat_id, user, origin):
             f"🎉 Готово! {plural_stickers(done)} уже в твоём паке: https://t.me/addstickers/{name}",
             keyboard=share_keyboard(name),
         )
+
+
+def make_meme_from(chat_id, source, args, reply_to):
+    """/mem Верх | Низ — мем без нейросети, мгновенно."""
+    top, sep, bottom = args.partition("|")
+    if not sep:
+        top, bottom = "", top  # одна строка — пишем снизу
+    if not (top.strip() or bottom.strip()):
+        send_message(chat_id, "Напиши текст мема: /mem Текст сверху | Текст снизу", reply_to=reply_to)
+        return
+    image = stickers.open_image(download_file(get_image_file_id(source)))
+    send_photo(
+        chat_id,
+        stickers.make_meme(image, top.strip(), bottom.strip()),
+        source["message_id"],
+        caption=f"😂 Мемы и стикеры — @{bot_username()}",
+    )
 
 
 def surprise(chat_id, user_id, message):
@@ -481,6 +639,17 @@ def handle_callback(query):
     chat_id = message.get("chat", {}).get("id")
     user = query["from"]
 
+    if data == "memhint":
+        telegram(
+            "answerCallbackQuery",
+            json={
+                "callback_query_id": query["id"],
+                "text": "Пришли это фото ещё раз с подписью:\n/mem Текст сверху | Текст снизу",
+                "show_alert": True,
+            },
+        )
+        return
+
     if data == "caption":
         telegram(
             "answerCallbackQuery",
@@ -531,24 +700,85 @@ def handle_callback(query):
         send_message(chat_id, "Не нашёл исходное сообщение — пришли фото или запрос заново.")
         return
 
-    if data == "emo":
-        make_emotion_pack(chat_id, user, origin)
+    if data in EMOTION_SETS:
+        make_emotion_pack(chat_id, user, origin, kind=data)
+        return
+
+    if data == "ava":
+        send_message(chat_id, "🖼 Выбери стиль аватарки 👇", reply_to=origin["message_id"], keyboard=avatar_keyboard())
+        return
+
+    if data == "card":
+        render(chat_id, user["id"], origin, mode="card", seed=random.randint(0, 2**31 - 1))
         return
 
     action, _, style = data.partition(":")
     if style == RANDOM:
         style = random.choice(list(STYLES))
-    if style and style != PLAIN and style not in STYLES:
+    if style and style != PLAIN and style not in ALL_STYLES:
         return
 
-    if action == "style":
+    if action == "ava" and style in ALL_STYLES:
+        render(chat_id, user["id"], origin, style=style, mode="avatar", seed=random.randint(0, 2**31 - 1))
+    elif action == "style":
         render(chat_id, user["id"], origin, style=style)
     elif action == "again":
         render(chat_id, user["id"], origin, style=style or None, seed=random.randint(0, 2**31 - 1))
 
 
+def handle_sticker_command(message, args):
+    """/sticker в группе или в личке: ответом на фото, с подписью к фото или с текстом."""
+    chat_id = message["chat"]["id"]
+    replied = message.get("reply_to_message") or {}
+    if get_image_file_id(message):
+        source = message
+    elif get_image_file_id(replied):
+        source = replied
+    else:
+        source = None
+
+    if not source and not args:
+        send_message(chat_id, GROUP_HELP, reply_to=message["message_id"])
+    elif source and not args:
+        send_message(chat_id, "Выбери стиль 👇", reply_to=source["message_id"], keyboard=style_keyboard())
+    elif source is message or not source:
+        render(chat_id, message["from"]["id"], message)
+    else:
+        # Ответ на чужое фото: просьбу берём из команды, картинку — из того фото.
+        origin = {key: source[key] for key in ("photo", "document", "sticker") if key in source}
+        origin.update({"message_id": source["message_id"], "caption": args})
+        render(chat_id, message["from"]["id"], origin, again_data=NO_AGAIN)
+
+
 def handle_message(message):
     chat_id = message["chat"]["id"]
+    raw_text = (message.get("text") or message.get("caption") or "").strip()
+    command, args, mention = split_command(raw_text)
+    if mention and mention.lower() != bot_username().lower():
+        return  # команда другому боту в группе
+
+    replied = message.get("reply_to_message") or {}
+    if command == "/sticker":
+        handle_sticker_command(message, args)
+        return
+    if command == "/mem":
+        source = message if get_image_file_id(message) else replied
+        if not get_image_file_id(source):
+            send_message(chat_id, "Ответь командой /mem на фото или пришли фото с подписью /mem Верх | Низ")
+            return
+        make_meme_from(chat_id, source, args, message["message_id"])
+        return
+
+    if message["chat"].get("type", "private") != "private":
+        # В группе отвечаем только на команды и на ответы к нашим стикерам.
+        if command in ("/start", "/help"):
+            send_message(chat_id, GROUP_HELP)
+        elif command == "/mypack":
+            send_my_pack(chat_id, message["from"]["id"])
+        elif raw_text and not command and is_our_sticker(replied):
+            caption_sticker(chat_id, replied, raw_text)
+        return
+
     text = message_text(message)
 
     if text.startswith("/start"):
@@ -567,7 +797,6 @@ def handle_message(message):
         send_my_pack(chat_id, message["from"]["id"])
         return
 
-    replied = message.get("reply_to_message") or {}
     if text and is_our_sticker(replied):
         caption_sticker(chat_id, replied, text)
         return
@@ -598,7 +827,17 @@ def safely(handler, update_part, chat_id):
             send_message(chat_id, "😔 Что-то пошло не так. Попробуй ещё раз или другую картинку.")
 
 
-ALLOWED_UPDATES = ["message", "callback_query"]
+ALLOWED_UPDATES = ["message", "callback_query", "my_chat_member"]
+
+
+def handle_added_to_chat(update):
+    """Бота добавили в группу — коротко рассказываем, что он умеет."""
+    chat = update.get("chat") or {}
+    status = (update.get("new_chat_member") or {}).get("status")
+    old_status = (update.get("old_chat_member") or {}).get("status")
+    if chat.get("type") in ("group", "supergroup") and status in ("member", "administrator") \
+            and old_status in ("left", "kicked", None):
+        send_message(chat["id"], GROUP_HELP)
 _webhook_checked = False
 _recent_updates = collections.OrderedDict()
 
@@ -655,7 +894,12 @@ def ensure_webhook_up_to_date():
 
 @app.route("/", methods=["GET"])
 def home():
-    return "Telegram sticker bot is running!"
+    try:
+        username = bot_username() if BOT_TOKEN else ""
+    except Exception as error:
+        print("Landing username error:", repr(error))
+        username = ""
+    return pages.landing_page(username)
 
 
 @app.route("/setup", methods=["GET"])
@@ -688,12 +932,15 @@ def webhook():
         return "OK"
     message = update.get("message")
     query = update.get("callback_query")
+    membership = update.get("my_chat_member")
 
     if message and message.get("chat") and message.get("from"):
         safely(handle_message, message, message["chat"]["id"])
     elif query:
         chat_id = (query.get("message") or {}).get("chat", {}).get("id")
         safely(handle_callback, query, chat_id)
+    elif membership:
+        safely(handle_added_to_chat, membership, None)
 
     return "OK"
 

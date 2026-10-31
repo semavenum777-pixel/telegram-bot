@@ -86,11 +86,11 @@ def _check(response):
 
 # ---------- нейросети для картинок ----------
 
-def _cloudflare_image(prompt, photo, timeout, seed, model=None):
+def _cloudflare_image(prompt, photo, timeout, seed, size=IMAGE_SIZE, model=None):
     files = {
         "prompt": (None, prompt),
-        "width": (None, str(IMAGE_SIZE)),
-        "height": (None, str(IMAGE_SIZE)),
+        "width": (None, str(size)),
+        "height": (None, str(size)),
     }
     if seed is not None:
         files["seed"] = (None, str(seed))
@@ -109,7 +109,7 @@ def _cloudflare_image(prompt, photo, timeout, seed, model=None):
     return base64.b64decode(response.json()["result"]["image"])
 
 
-def _cloudflare_schnell(prompt, photo, timeout, seed):
+def _cloudflare_schnell(prompt, photo, timeout, seed, size=IMAGE_SIZE):
     """Старая быстрая модель Cloudflare: только рисование по тексту, принимает JSON."""
     payload = {"prompt": prompt, "steps": 8}
     if seed is not None:
@@ -124,7 +124,7 @@ def _cloudflare_schnell(prompt, photo, timeout, seed):
     return base64.b64decode(response.json()["result"]["image"])
 
 
-def _gemini_image(prompt, photo, timeout, seed):
+def _gemini_image(prompt, photo, timeout, seed, size=IMAGE_SIZE):
     parts = [{"text": f"{prompt}. Square image."}]
     if photo:
         for key in ("large", "ref_large"):
@@ -150,10 +150,10 @@ def _gemini_image(prompt, photo, timeout, seed):
     raise ValueError("Gemini returned no image")
 
 
-def _pollinations_image(prompt, photo, timeout, seed, model=None):
+def _pollinations_image(prompt, photo, timeout, seed, size=IMAGE_SIZE, model=None):
     model = model or POLLINATIONS_MODEL
     headers = {"Authorization": f"Bearer {POLLINATIONS_KEY}"}
-    size = f"{IMAGE_SIZE}x{IMAGE_SIZE}"
+    size = f"{size}x{size}"
     if photo:
         response = requests.post(
             f"{POLLINATIONS_API}/images/edits",
@@ -179,7 +179,7 @@ def _pollinations_image(prompt, photo, timeout, seed, model=None):
     return image.content
 
 
-def _bfl_image(prompt, photo, timeout, seed):
+def _bfl_image(prompt, photo, timeout, seed, size=IMAGE_SIZE):
     """Black Forest Labs — создатели FLUX. Kontext умеет менять фото."""
     deadline = time.monotonic() + timeout
     headers = {"x-key": BFL_API_KEY, "accept": "application/json"}
@@ -211,7 +211,7 @@ def _bfl_image(prompt, photo, timeout, seed):
 _fusionbrain_pipeline = None
 
 
-def _fusionbrain_image(prompt, photo, timeout, seed):
+def _fusionbrain_image(prompt, photo, timeout, seed, size=IMAGE_SIZE):
     """Kandinsky (Сбер). Умеет только рисовать по тексту, фото не принимает."""
     global _fusionbrain_pipeline
     deadline = time.monotonic() + timeout
@@ -308,7 +308,7 @@ def ai_configured(has_photo=False):
     return any(p["enabled"]() and (p["photo"] or not has_photo) for p in PROVIDERS)
 
 
-def generate_image(prompt, photo_png=None, photo_png_small=None, seed=None, ref_png=None, ref_png_small=None):
+def generate_image(prompt, photo_png=None, photo_png_small=None, seed=None, ref_png=None, ref_png_small=None, size=IMAGE_SIZE):
     """Возвращает картинку (bytes) от первой сработавшей нейросети.
     ref_png — необязательная вторая картинка-образец (например, уже готовый стикер этого персонажа)."""
     photo = None
@@ -323,7 +323,7 @@ def generate_image(prompt, photo_png=None, photo_png_small=None, seed=None, ref_
         if remaining < 15:
             break
         try:
-            return provider["call"](prompt, photo, min(provider["timeout"], remaining), seed)
+            return provider["call"](prompt, photo, min(provider["timeout"], remaining), seed, size)
         except LimitReached as error:
             print(f"{provider['name']} limit reached:", error)
             _exhausted_until[provider["group"]] = time.time() + EXHAUSTED_COOLDOWN_SECONDS
