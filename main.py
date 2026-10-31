@@ -381,7 +381,16 @@ def style_buttons(styles, prefix):
     return [{"text": label, "callback_data": f"{prefix}:{key}"} for key, (label, _) in styles.items()]
 
 
-def style_keyboard():
+def video_available(user_id):
+    """Показывать ли «🎬 Оживить»: если баланс не подключён — да (бот предложит подключить),
+    если подключён — только когда хоть одна видео-модель доступна этому пользователю."""
+    if not premium_available():
+        return False
+    key = premium_key(user_id) if user_id else None
+    return not key or bool(ai.video_models_for_key(key))
+
+
+def style_keyboard(user_id=None):
     rows = []
     if new_year_season():
         rows.append([{"text": "🎄 Новогодний набор — 6 стикеров в пак", "callback_data": "emony"}])
@@ -394,7 +403,8 @@ def style_keyboard():
         {"text": "🖼 Просто стикер", "callback_data": f"style:{PLAIN}"},
     ])
     if premium_available():
-        rows.insert(0, [{"text": "🎬 Оживить фото — живое видео", "callback_data": "video"}])
+        if video_available(user_id):
+            rows.insert(0, [{"text": "🎬 Оживить фото — живое видео", "callback_data": "video"}])
         rows.insert(0, [{"text": "📸 Фотосессия — реалистичное фото", "callback_data": "photo"}])
     rows.append([
         {"text": "🖼 Аватарка", "callback_data": "ava"},
@@ -938,7 +948,7 @@ def make_photo_edit(chat_id, user_id, origin, scene, again_data):
             delete_message(chat_id, status["result"]["message_id"])
 
     row = [] if again_data == NO_AGAIN else [{"text": "🔄 Ещё вариант", "callback_data": again_data}]
-    if premium_available():
+    if video_available(user_id):
         row.append({"text": "🎬 Оживить", "callback_data": "video:self"})
     keyboard = [row] if row else None
     send_photo(
@@ -1230,7 +1240,8 @@ def handle_sticker_command(message, args):
     if not source and not args:
         send_message(chat_id, GROUP_HELP, reply_to=message["message_id"])
     elif source and not args:
-        send_message(chat_id, "Выбери стиль 👇", reply_to=source["message_id"], keyboard=style_keyboard())
+        send_message(chat_id, "Выбери стиль 👇", reply_to=source["message_id"],
+                     keyboard=style_keyboard(message["from"]["id"]))
     elif source is message or not source:
         render(chat_id, message["from"]["id"], message)
     else:
@@ -1352,7 +1363,7 @@ def handle_message(message):
             chat_id,
             "Выбери стиль 👇",
             reply_to=message["message_id"],
-            keyboard=style_keyboard(),
+            keyboard=style_keyboard(message["from"]["id"]),
         )
         return
 
