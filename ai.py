@@ -497,13 +497,51 @@ def parse_request(text, has_photo):
 # ---------- живое видео из фото ----------
 
 # Видео-нейросеть Pollinations: оживляет фото (моргание, улыбка, движение). Тратит баланс Pollinations.
-POLLINATIONS_VIDEO_MODEL = _env("POLLINATIONS_VIDEO_MODEL", "alibaba/wan-2.2-fast")
+# Видео-модели в порядке предпочтения (быстрые и дешёвые — первыми). Бот берёт те,
+# что доступны ключу пользователя: «только за деньги» на бесплатном балансе не работают.
+PREFERRED_VIDEO_MODELS = [
+    model.strip() for model in _env(
+        "POLLINATIONS_VIDEO_MODELS",
+        _env("POLLINATIONS_VIDEO_MODEL", "")
+        or "alibaba/wan-2.2-fast,bytedance/seedance-1-pro-fast,x-ai/grok-imagine-video-1.5-lite,"
+           "prunaai/p-video,bytedance/seedance-2.0-mini,bytedance/seedance-2.0-fast,alibaba/wan-2.6,"
+           "google/gemini-omni-1.1-flash,x-ai/grok-imagine-video,bytedance/seedance-2.0,alibaba/wan-2.7,"
+           "bytedance/seedance-2.5,alibaba/wan-3.0,google/veo-3.1-fast",
+    ).split(",") if model.strip()
+]
+VIDEO_MODEL_NAMES = {
+    "alibaba/wan-2.2-fast": "Wan 2.2 (Alibaba)",
+    "bytedance/seedance-1-pro-fast": "Seedance (ByteDance)",
+    "x-ai/grok-imagine-video-1.5-lite": "Grok Imagine Video",
+    "prunaai/p-video": "P-Video",
+    "google/gemini-omni-1.1-flash": "Gemini Omni (Google)",
+    "google/veo-3.1-fast": "Veo 3.1 (Google)",
+}
+# У некоторых моделей длина видео фиксирована.
+VIDEO_FIXED_SECONDS = {"alibaba/wan-3.0": 5, "bytedance/seedance-2.5": 4}
 VIDEO_SECONDS = int(_env("VIDEO_SECONDS", "4"))
 POLLINATIONS_MEDIA = "https://media.pollinations.ai"
 
 
 def video_configured():
     return bool(_pkey())
+
+
+def free_models_report(key):
+    """Текст для /models: какие модели сейчас доступны этому ключу."""
+    photo = photo_models_for_key(key)
+    video = video_models_for_key(key)
+    known = _catalog(key) is not None
+    lines = []
+    lines.append("📸 Фото с твоим лицом: " + (
+        ", ".join(PHOTO_MODEL_NAMES.get(m, m) for m in photo[:6]) if photo
+        else "сильных моделей нет — работает бесплатная Cloudflare FLUX.2 klein"))
+    lines.append("🎬 Живое видео: " + (
+        ", ".join(VIDEO_MODEL_NAMES.get(m, m) for m in video[:4]) if video else "недоступно на этом балансе"))
+    lines.append("🎨 Стикеры: Cloudflare FLUX.2 klein (бесплатно, ~300 в день на бота)")
+    if not known:
+        lines.append("\n(Не удалось спросить у Pollinations — показан полный список, бот проверит при генерации.)")
+    return "\n".join(lines)
 
 
 def _upload_to_pollinations(image_bytes, name="photo.jpg", mime="image/jpeg"):
@@ -523,32 +561,43 @@ def animate_photo(image_bytes, prompt, portrait=True):
     """Возвращает MP4: фото, превращённое в короткое живое видео."""
     if not video_configured():
         raise AIUnavailable("No video provider configured")
+    key = _pkey()
+    models = video_models_for_key(key)
+    if not models:
+        last_used["video"] = ""
+        raise AIUnavailable("No video models available for this key")
+    deadline = time.monotonic() + TOTAL_BUDGET_SECONDS
     try:
         url = _upload_to_pollinations(image_bytes)
-        response = requests.get(
-            f"https://gen.pollinations.ai/video/{requests.utils.quote(prompt, safe='')}",
-            headers={"Authorization": f"Bearer {_pkey()}"},
-            params={
-                "model": POLLINATIONS_VIDEO_MODEL,
-                "image": url,
-                "duration": VIDEO_SECONDS,
-                "aspectRatio": "9:16" if portrait else "16:9",
-                "audio": "false",
-            },
-            timeout=TOTAL_BUDGET_SECONDS,
-        )
-        _check(response)
-        if not response.headers.get("content-type", "").startswith("video/"):
-            raise ValueError(f"Unexpected response: {response.headers.get('content-type')}")
-        return response.content
-    except LimitReached as error:
-        print("Video limit reached:", error)
-        raise AIUnavailable("No video credits") from error
-    except AIUnavailable:
-        raise
     except Exception as error:
-        print("Video failed:", repr(error))
-        raise AIUnavailable("Video generation failed") from error
+        print("Video upload failed:", repr(error))
+        raise AIUnavailable("Upload failed") from error
+
+    for model in models[:2]:
+        remaining = deadline - time.monotonic()
+        if remaining < 30:
+            break
+        try:
+            response = requests.get(
+                f"https://gen.pollinations.ai/video/{requests.utils.quote(prompt, safe='')}",
+                headers={"Authorization": f"Bearer {key}"},
+                params={
+                    "model": model,
+                    "image": url,
+                    "duration": VIDEO_FIXED_SECONDS.get(model, VIDEO_SECONDS),
+                    "aspectRatio": "9:16" if portrait else "16:9",
+                    "audio": "false",
+                },
+                timeout=remaining,
+            )
+            _check(response)
+            if not response.headers.get("content-type", "").startswith("video/"):
+                raise ValueError(f"Unexpected response: {response.headers.get('content-type')}")
+            last_used["video"] = VIDEO_MODEL_NAMES.get(model, model)
+            return response.content
+        except Exception as error:
+            print(f"Video {model} failed:", repr(error))
+    raise AIUnavailable("Video generation failed")
 
 
 # ---------- реалистичный фоторедактор (как Nano Banana) ----------
@@ -591,8 +640,9 @@ last_used = {"name": ""}
 _models_cache = {}  # ключ → (время, список доступных моделей, умеющих править фото)
 
 
-def photo_models_for_key(key):
-    """Модели для правки фото, доступные этому ключу, в порядке предпочтения."""
+def _catalog(key):
+    """Каталог моделей Pollinations, доступных этому ключу (модели «только за деньги» для
+    бесплатного баланса Pollinations сам скрывает). None — узнать не удалось."""
     cached = _models_cache.get(key)
     if cached and time.time() - cached[0] < MODELS_CACHE_SECONDS:
         return cached[1]
@@ -605,24 +655,39 @@ def photo_models_for_key(key):
         response.raise_for_status()
         entries = response.json()
         entries = entries.get("data", []) if isinstance(entries, dict) else entries
-        editable = set()
-        for entry in entries:
-            names = {entry.get("id"), entry.get("name"), *(entry.get("aliases") or [])} - {None}
-            takes_image = "image" in (entry.get("input_modalities") or []) or any(
-                "edits" in endpoint for endpoint in entry.get("supported_endpoints") or []
-            )
-            makes_image = "image" in (entry.get("output_modalities") or ["image"])
-            healthy = (entry.get("health") or {}).get("status") != "down"
-            if takes_image and makes_image and healthy:
-                editable |= names
-        models = [m for m in PREFERRED_PHOTO_MODELS if m in editable]
-        if not models:
-            print("No editable photo models for this key; listing:", sorted(editable)[:20])
     except Exception as error:
         print("Model list error:", repr(error))
-        models = list(PREFERRED_PHOTO_MODELS)  # не смогли узнать — пробуем по списку
-    _models_cache[key] = (time.time(), models)
-    return models
+        entries = None
+    _models_cache[key] = (time.time(), entries)
+    return entries
+
+
+def _models_with(key, preferred, output):
+    """Модели из списка предпочтений, которые доступны ключу, принимают фото и выдают output."""
+    entries = _catalog(key)
+    if entries is None:
+        return list(preferred)  # не смогли узнать — пробуем по списку
+    suitable = set()
+    for entry in entries:
+        names = {entry.get("id"), entry.get("name"), *(entry.get("aliases") or [])} - {None}
+        takes_image = "image" in (entry.get("input_modalities") or []) or any(
+            "edits" in endpoint for endpoint in entry.get("supported_endpoints") or []
+        )
+        outputs = entry.get("output_modalities") or ["image"]
+        healthy = (entry.get("health") or {}).get("status") != "down"
+        if takes_image and output in outputs and healthy:
+            suitable |= names
+    return [model for model in preferred if model in suitable]
+
+
+def photo_models_for_key(key):
+    """Модели для правки фото, доступные этому ключу, в порядке предпочтения."""
+    return _models_with(key, PREFERRED_PHOTO_MODELS, "image")
+
+
+def video_models_for_key(key):
+    """Видео-модели, которые умеют оживлять фото и доступны этому ключу."""
+    return _models_with(key, PREFERRED_VIDEO_MODELS, "video")
 
 
 def _pollinations_edit_by_url(key, model, prompt, image_url, timeout, seed):

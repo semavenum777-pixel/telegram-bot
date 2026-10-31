@@ -230,6 +230,7 @@ BOT_COMMANDS = [
     {"command": "invite", "description": "Пригласить друга — больше генераций"},
     {"command": "connect", "description": "Подключить свой бесплатный баланс для фото и видео"},
     {"command": "balance", "description": "Мой баланс для фото и видео"},
+    {"command": "models", "description": "Какие нейросети мне доступны бесплатно"},
     {"command": "help", "description": "Как пользоваться"},
 ]
 
@@ -989,7 +990,7 @@ def make_live_video(chat_id, user_id, origin, motion):
         "sendAnimation",
         data={
             "chat_id": chat_id,
-            "caption": f"🎬 Сделано в @{bot_username()}",
+            "caption": f"🎬 Сделано в @{bot_username()} · нейросеть: {ai.last_used.get('video') or '—'}",
             "reply_parameters": json.dumps({"message_id": origin["message_id"], "allow_sending_without_reply": True}),
             "reply_markup": json.dumps({"inline_keyboard": [
                 [{"text": "🔄 Ещё раз", "callback_data": f"vid:{motion}"},
@@ -1263,6 +1264,14 @@ def handle_message(message):
     if command == "/sticker":
         handle_sticker_command(message, args)
         return
+    if command == "/models":
+        key = premium_key(message["from"]["id"])
+        if key:
+            send_message(chat_id, "🤖 Сейчас тебе доступны:\n\n" + ai.free_models_report(key))
+        else:
+            send_connect_prompt(chat_id)
+        return
+
     if command in ("/connect", "/balance", "/disconnect") or raw_text.startswith("/start connect"):
         if message["chat"].get("type", "private") != "private":
             send_message(chat_id, f"🔗 Это в личке с ботом: https://t.me/{bot_username()}?start=connect")
