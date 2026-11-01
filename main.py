@@ -231,7 +231,6 @@ BOT_COMMANDS = [
     {"command": "connect", "description": "Лучшее качество фотосессий (по желанию)"},
     {"command": "balance", "description": "Мой баланс для фотосессий"},
     {"command": "models", "description": "Какие нейросети мне доступны бесплатно"},
-    {"command": "stats", "description": "Статистика бота: сколько людей пользуется"},
     {"command": "help", "description": "Как пользоваться"},
 ]
 
@@ -717,10 +716,6 @@ def format_count(n):
 
 def send_start(chat_id, user_id):
     text = START_TEXT
-    numbers = limits.stats()
-    if numbers and numbers[0] >= 10:
-        users, gens = numbers
-        text += f"\n\n🔥 Уже {format_count(users)} человек сделали {format_count(gens)} картинок."
     telegram("sendMessage", json={
         "chat_id": chat_id,
         "text": text,
@@ -731,6 +726,16 @@ def send_start(chat_id, user_id):
              {"text": "🎁 Пригласить друга", "callback_data": "invite"}],
         ]},
     })
+
+
+# Кто может смотреть /stats: Telegram id владельца (можно задать OWNER_IDS через запятую в Vercel).
+OWNER_IDS = {
+    owner.strip() for owner in os.environ.get("OWNER_IDS", "1428958622").split(",") if owner.strip()
+}
+
+
+def is_owner(user_id):
+    return str(user_id) in OWNER_IDS
 
 
 def send_stats(chat_id):
@@ -1297,8 +1302,9 @@ def handle_message(message):
         handle_sticker_command(message, args)
         return
     if command == "/stats":
-        send_stats(chat_id)
-        return
+        if is_owner(message["from"]["id"]) and is_private:
+            send_stats(chat_id)
+        return  # для остальных команды как будто нет
 
     if command == "/models":
         key = premium_key(message["from"]["id"])
