@@ -133,8 +133,17 @@ def track_user(user_id):
     """Запоминает пользователя. True, если он пишет боту впервые."""
     if not store_enabled():
         return False
+    today = datetime.date.today().isoformat()
+    week = 8 * 24 * 3600
     try:
-        return _redis(["SADD", "users", str(user_id)])[0] == 1
+        is_new = _redis(
+            ["SADD", "users", str(user_id)],
+            ["SADD", f"active:{today}", str(user_id)],
+            ["EXPIRE", f"active:{today}", week],
+        )[0] == 1
+        if is_new:
+            _redis(["SADD", f"new:{today}", str(user_id)], ["EXPIRE", f"new:{today}", week])
+        return is_new
     except Exception as error:
         print("Track error:", repr(error))
         return False
@@ -177,3 +186,34 @@ def friends_count(user_id):
         return int(_redis(["SCARD", f"friends:{user_id}"])[0] or 0)
     except Exception:
         return 0
+
+
+def detailed_stats():
+    """Подробная статистика для /stats или None без базы."""
+    if not store_enabled():
+        return None
+    today = datetime.date.today()
+    days = [(today - datetime.timedelta(days=i)).isoformat() for i in range(7)]
+    try:
+        results = _redis(
+            ["SCARD", "users"],
+            ["GET", "stats:gens"],
+            *[["SCARD", f"active:{day}"] for day in days],
+            *[["SCARD", f"new:{day}"] for day in days],
+            ["KEYS", "invited:*"],
+        )
+    except Exception as error:
+        print("Stats error:", repr(error))
+        return None
+    active = [int(x or 0) for x in results[2:9]]
+    new = [int(x or 0) for x in results[9:16]]
+    return {
+        "users": int(results[0] or 0),
+        "gens": int(results[1] or 0),
+        "active_today": active[0],
+        "new_today": new[0],
+        "active_week": active,
+        "new_week": new,
+        "days": days,
+        "invited": len(results[16] or []),
+    }

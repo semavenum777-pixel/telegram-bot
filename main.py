@@ -231,6 +231,7 @@ BOT_COMMANDS = [
     {"command": "connect", "description": "Лучшее качество фотосессий (по желанию)"},
     {"command": "balance", "description": "Мой баланс для фотосессий"},
     {"command": "models", "description": "Какие нейросети мне доступны бесплатно"},
+    {"command": "stats", "description": "Статистика бота: сколько людей пользуется"},
     {"command": "help", "description": "Как пользоваться"},
 ]
 
@@ -730,6 +731,27 @@ def send_start(chat_id, user_id):
              {"text": "🎁 Пригласить друга", "callback_data": "invite"}],
         ]},
     })
+
+
+def send_stats(chat_id):
+    data = limits.detailed_stats()
+    if not data:
+        send_message(chat_id, "📊 Статистика появится, когда к боту подключена база Upstash.")
+        return
+    week = "\n".join(
+        f"• {day[8:10]}.{day[5:7]}: {active} активных, {new} новых"
+        for day, active, new in zip(data["days"], data["active_week"], data["new_week"])
+    )
+    send_message(
+        chat_id,
+        "📊 Статистика бота\n\n"
+        f"👥 Всего пользователей: {format_count(data['users'])}\n"
+        f"🎨 Сделано генераций: {format_count(data['gens'])}\n"
+        f"🎁 Пришли по приглашениям: {format_count(data['invited'])}\n\n"
+        f"Сегодня: {data['active_today']} активных, {data['new_today']} новых\n\n"
+        f"За 7 дней:\n{week}\n\n"
+        "Считаются люди, писавшие боту в личке после подключения базы.",
+    )
 
 
 def surprise(chat_id, user_id, message):
@@ -1274,6 +1296,10 @@ def handle_message(message):
     if command == "/sticker":
         handle_sticker_command(message, args)
         return
+    if command == "/stats":
+        send_stats(chat_id)
+        return
+
     if command == "/models":
         key = premium_key(message["from"]["id"])
         if key:
